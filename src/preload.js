@@ -29,7 +29,13 @@ contextBridge.exposeInMainWorld('api', {
   updateInstall: () => ipcRenderer.invoke('update:install'),
   updatePage: () => ipcRenderer.invoke('update:page'),
   onUpdateAvailable: cb => ipcRenderer.on('update:available', (_e, info) => cb(info)),
-  onUpdateProgress: cb => ipcRenderer.on('update:progress', (_e, p) => cb(p)),
+  // Returns its own remover: an install can be attempted more than once, and
+  // each attempt's callback writes into a modal that is gone by the next one.
+  onUpdateProgress: cb => {
+    const on = (_e, p) => cb(p)
+    ipcRenderer.on('update:progress', on)
+    return () => ipcRenderer.removeListener('update:progress', on)
+  },
   setPresentation: (menuBar, hideDock) => ipcRenderer.invoke('settings:setPresentation', { menuBar, hideDock }),
   onShowSettings: cb => ipcRenderer.on('settings:show', () => cb()),
   dockStatus: () => ipcRenderer.invoke('dock:status'),
@@ -37,7 +43,6 @@ contextBridge.exposeInMainWorld('api', {
   quitAccount: id => ipcRenderer.invoke('accounts:quit', id),
   chromeList: accountId => ipcRenderer.invoke('chrome:list', accountId),
   chromePair: (accountId, dir, openOnLaunch) => ipcRenderer.invoke('chrome:pair', { accountId, dir, openOnLaunch }),
-  chromeOpen: dir => ipcRenderer.invoke('chrome:open', dir),
   chromeExtension: dir => ipcRenderer.invoke('chrome:extension', dir),
   chromeNewProfile: () => ipcRenderer.invoke('chrome:newProfile'),
   scanHealth: () => ipcRenderer.invoke('health:scan'),

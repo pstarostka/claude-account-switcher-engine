@@ -1,7 +1,7 @@
 'use strict'
 
-// The pre-flight CI runs on every push. There is no test framework here, so
-// this checks the things that would actually break a release:
+// The pre-flight CI runs on every push. `npm run check` runs this and then the
+// tests in test/; this half covers what no unit test can see:
 //
 //   * every source file parses
 //   * the preload surface and the main process agree on their IPC channels
@@ -64,14 +64,19 @@ for (const ch of handled) {
 }
 console.log(`checked ${invoked.size + listened.size} ipc channels`)
 
-// Everything the renderer reaches for must exist on the preload bridge.
+// Everything the renderer reaches for must exist on the preload bridge, and
+// everything the bridge offers must be reached for — an exposed method nothing
+// calls is IPC surface kept alive by nothing but habit.
 const rendererSrc = read('src/renderer/renderer.js')
 const exposed = new Set([...preloadSrc.matchAll(/^\s{2}(\w+):/gm)].map(m => m[1]))
 const used = new Set([...rendererSrc.matchAll(/window\.api\.(\w+)/g)].map(m => m[1]))
 for (const name of used) {
   if (!exposed.has(name)) problems.push(`renderer calls window.api.${name}, which preload does not expose`)
 }
-console.log(`checked ${used.size} bridge methods`)
+for (const name of exposed) {
+  if (!used.has(name)) problems.push(`preload exposes ${name}, which the renderer never calls — dead bridge method`)
+}
+console.log(`checked ${exposed.size} bridge methods`)
 
 // ---------------------------------------------------------- version check ---
 

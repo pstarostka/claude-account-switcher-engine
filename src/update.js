@@ -23,6 +23,8 @@ const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
+const { Readable } = require('node:stream')
+const { pipeline } = require('node:stream/promises')
 
 const macos = require('./macos')
 
@@ -88,12 +90,18 @@ async function check () {
     const version = String(rel.tag_name || '').replace(/^v/, '')
     const asset = (rel.assets || []).find(a => /\.zip$/i.test(a.name))
     const sum = (rel.assets || []).find(a => /\.zip\.sha256$/i.test(a.name))
+    const newer = Boolean(asset) && compareVersions(version, current) > 0
 
     return {
       ok: true,
       current,
       version,
-      available: Boolean(asset) && compareVersions(version, current) > 0,
+      // A release with no checksum beside it cannot be installed — download()
+      // refuses it — so it is reported as found rather than offered. Calling it
+      // unavailable would amount to saying this version is the latest, which is
+      // not true and is the one thing a version check must not get wrong.
+      available: newer && Boolean(sum),
+      unverifiable: newer && !sum,
       notes: String(rel.body || '').slice(0, 2000),
       publishedAt: rel.published_at ? Date.parse(rel.published_at) : null,
       url: asset?.browser_download_url || null,
@@ -127,10 +135,43 @@ const runp = (cmd, args) => new Promise((resolve, reject) =>
   execFile(cmd, args, { maxBuffer: 1 << 20 }, (err, out) => (err ? reject(err) : resolve(String(out)))))
 
 /**
+ * Quote a string for /bin/sh. Single quotes are the only ones sh does nothing
+ * inside, so the single quote itself is the one character needing care —
+ * JSON.stringify looks close enough to be tempting here and is not: it leaves
+ * `$` and backticks alone, which a double-quoted shell string still expands.
+ */
+const sq = s => `'${String(s).replace(/'/g, "'\\''")}'`
+
+/**
+ * Stream the response to disk.
+ *
+ * pipeline() rather than a hand-rolled reader loop: it honours backpressure —
+ * or a 200 MB download accumulates in memory faster than the disk drains it —
+ * and, the reason this is not written by hand, it turns a write failure into a
+ * rejection. An 'error' on a write stream with no listener is an uncaught
+ * exception that takes the whole process down, and one raised while waiting for
+ * 'drain' leaves that wait pending for ever, which is the sheet stuck on
+ * "Downloading…" all over again.
+ */
+async function write (body, file, total, onProgress) {
+  let seen = 0
+  const src = Readable.fromWeb(body)
+  if (onProgress && total) {
+    src.on('data', c => { seen += c.length; onProgress(Math.min(1, seen / total)) })
+  }
+  await pipeline(src, fs.createWriteStream(file))
+}
+
+/**
  * Fetch the release zip and prove it is what the release says it is. Without a
- * Developer ID signature to lean on, the published checksum is the only thing
- * standing between a download and running whatever arrived — so a release with
- * no .sha256 beside it is refused rather than trusted.
+ * Developer ID signature to lean on, the published checksum is what stands
+ * between a download and running whatever arrived — so a release with no
+ * .sha256 beside it is refused rather than trusted.
+ *
+ * Note what this does and does not buy: the checksum is fetched from the same
+ * release as the zip, so it proves the bytes arrived intact from GitHub, not
+ * that GitHub served something trustworthy. A signature would prove the latter;
+ * this proves the former, which is the part a transfer can get wrong.
  */
 async function download (info, onProgress) {
   if (!info?.url) return { error: 'That release has no download attached.' }
@@ -138,38 +179,32 @@ async function download (info, onProgress) {
 
   const stage = await fsp.mkdtemp(path.join(os.tmpdir(), 'case-update-'))
   const zip = path.join(stage, 'CASE.zip')
+  let verified = false
 
-  const res = await net.fetch(info.url, { headers: { 'User-Agent': `CASE/${app.getVersion()}` } })
-  if (!res.ok) return { error: `Download failed: GitHub returned ${res.status}` }
+  try {
+    const res = await net.fetch(info.url, { headers: { 'User-Agent': `CASE/${app.getVersion()}` } })
+    if (!res.ok) return { error: `Download failed: GitHub returned ${res.status}` }
 
-  const total = Number(res.headers.get('content-length')) || info.bytes || 0
-  const out = fs.createWriteStream(zip)
-  let seen = 0
+    await write(res.body, zip, Number(res.headers.get('content-length')) || info.bytes || 0, onProgress)
 
-  // A reader loop rather than `for await (… of res.body)`: this is Chromium's
-  // ReadableStream, which — unlike Node's — is not async-iterable, so the
-  // pleasant version throws. Backpressure is honoured explicitly too, or a
-  // 200 MB download accumulates in memory faster than the disk drains it.
-  const reader = res.body.getReader()
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    seen += value.length
-    if (!out.write(Buffer.from(value))) {
-      await new Promise(r => out.once('drain', r))
+    const expected = (await getText(info.sha256Url)).trim().split(/\s+/)[0].toLowerCase()
+    const actual = (await sha256(zip)).toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(expected) || expected !== actual) {
+      return { error: 'The download did not match its published checksum, so it was discarded.' }
     }
-    if (onProgress && total) onProgress(Math.min(1, seen / total))
-  }
-  await new Promise((resolve, reject) => out.end(err => (err ? reject(err) : resolve())))
 
-  const expected = (await getText(info.sha256Url)).trim().split(/\s+/)[0].toLowerCase()
-  const actual = (await sha256(zip)).toLowerCase()
-  if (!/^[0-9a-f]{64}$/.test(expected) || expected !== actual) {
-    await fsp.rm(stage, { recursive: true, force: true })
-    return { error: 'The download did not match its published checksum, so it was discarded.' }
+    verified = true
+    return { stage, zip }
+  } finally {
+    // Every way out of here other than a verified download leaves ~200 MB of
+    // nothing in /tmp, including the ones that throw.
+    if (!verified) await fsp.rm(stage, { recursive: true, force: true })
   }
+}
 
-  return { stage, zip }
+/** Throw away a staged download that will not be installed after all. */
+function discard (staged) {
+  return fsp.rm(staged.stage, { recursive: true, force: true }).catch(() => {})
 }
 
 // -------------------------------------------------------------------- apply ---
@@ -225,9 +260,9 @@ for i in $(seq 1 200); do
   sleep 0.1
 done
 
-DEST=${JSON.stringify(dest)}
-FRESH=${JSON.stringify(fresh)}
-STAGE=${JSON.stringify(staged.stage)}
+DEST=${sq(dest)}
+FRESH=${sq(fresh)}
+STAGE=${sq(staged.stage)}
 
 rm -rf "$DEST.old"
 mv "$DEST" "$DEST.old" || exit 1
@@ -246,4 +281,4 @@ rm -rf "$STAGE"
   return { ok: true, relaunching: true }
 }
 
-module.exports = { check, download, apply, compareVersions, RELEASES_PAGE, REPO }
+module.exports = { check, download, discard, apply, compareVersions, sq, RELEASES_PAGE, REPO }

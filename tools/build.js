@@ -94,7 +94,7 @@ packager({
   icon: ICNS,
   prune: true,
   quiet: true,
-  ignore: [/^\/out/, /^\/tools/, /^\/assets/, /^\/\.git/, /^\/README\.md$/]
+  ignore: [/^\/out/, /^\/tools/, /^\/test/, /^\/assets/, /^\/\.git/, /^\/README\.md$/]
 }).then(([built]) => {
   const src = path.join(built, `${pkg.productName}.app`)
 

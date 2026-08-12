@@ -19,18 +19,29 @@ const tray = require('./tray')
 // There is no single-instance lock in the bundle, so profiles run side by side.
 const SUPPORT = app.getPath('appData')            // ~/Library/Application Support
 const DEFAULT_PROFILE = path.join(SUPPORT, 'Claude')
-const CONF_DIR = path.join(SUPPORT, 'CASE')
-const LEGACY_CONF_DIR = path.join(SUPPORT, 'ClaudeAccounts')
+// Electron's own userData directory — SUPPORT/<productName>. Asked for rather
+// than spelled out, so renaming the app cannot silently move the config.
+const CONF_DIR = app.getPath('userData')
+const LEGACY_CONF_DIR = path.join(SUPPORT, 'Claude Accounts')
 const CONF = path.join(CONF_DIR, 'accounts.json')
 const LEGACY_TSV = path.join(CONF_DIR, 'accounts.tsv')
 const BACKUP_ROOT = path.join(CONF_DIR, 'session-index-backups')
 
-// Carry a pre-rename install across in one move, before anything reads it.
-try {
-  if (!fs.existsSync(CONF_DIR) && fs.existsSync(LEGACY_CONF_DIR)) {
-    fs.renameSync(LEGACY_CONF_DIR, CONF_DIR)
+// Carry a pre-rename install across before anything reads it.
+//
+// The directory cannot be renamed into place: Electron creates its own userData
+// before this file runs, so the destination always exists. What moves is the
+// three things this app keeps there — never over something already present, so
+// a half-finished migration cannot overwrite a working config on the next run.
+if (!fs.existsSync(CONF)) {
+  for (const name of ['accounts.json', 'accounts.tsv', 'session-index-backups']) {
+    try {
+      const from = path.join(LEGACY_CONF_DIR, name)
+      const to = path.join(CONF_DIR, name)
+      if (fs.existsSync(from) && !fs.existsSync(to)) fs.renameSync(from, to)
+    } catch {}
   }
-} catch {}
+}
 
 let win = null
 
@@ -135,7 +146,6 @@ function discoverProfiles () {
   try { entries = fs.readdirSync(SUPPORT, { withFileTypes: true }) } catch {}
   for (const e of entries) {
     if (!e.isDirectory() || !e.name.startsWith('Claude-')) continue
-    if (e.name === 'ClaudeAccounts') continue
     // An archived profile is deliberately set aside; offering it back here
     // would undo the archive by accident.
     if (archive.isArchivePath(e.name)) continue
@@ -587,8 +597,6 @@ ipcMain.handle('chrome:pair', async (_e, { accountId, dir, openOnLaunch }) => {
   return { accounts: sortAccounts(await decorate(accounts)) }
 })
 
-ipcMain.handle('chrome:open', async (_e, dir) => chrome.launch(dir))
-
 ipcMain.handle('chrome:extension', async (_e, dir) => chrome.openExtensionPage(dir))
 
 ipcMain.handle('chrome:newProfile', async () => ({ dir: chrome.nextProfileDir() }))
@@ -609,9 +617,6 @@ ipcMain.handle('app:claudeInstalled', () => fs.existsSync('/Applications/Claude.
 
 // -------------------------------------------------------------- self-update ---
 
-// Held between the check and the install so the renderer never handles a path.
-let staged = null
-
 ipcMain.handle('update:check', async () => {
   const res = await update.check()
   lastUpdate = res
@@ -621,14 +626,17 @@ ipcMain.handle('update:check', async () => {
 
 ipcMain.handle('update:install', async _e => {
   if (!lastUpdate?.available) return { error: 'No update to install.' }
+  // Held between the download and the install so the renderer never handles a
+  // path, and cleared once the swap script owns it.
+  let staged = null
   try {
-    const got = await update.download(lastUpdate, p => {
+    staged = await update.download(lastUpdate, p => {
       if (win && !win.isDestroyed()) win.webContents.send('update:progress', p)
     })
-    if (got.error) return got
-    staged = got
+    if (staged.error) return staged
     const res = await update.apply(staged)
     if (res.error) return res
+    staged = null
     // The swap script waits for this process to exit before replacing the bundle.
     isQuitting = true
     setTimeout(() => app.quit(), 250)
@@ -637,6 +645,9 @@ ipcMain.handle('update:install', async _e => {
     // Without this the renderer's promise never settles and the sheet sits on
     // "Downloading…" for ever, which is how the ReadableStream bug presented.
     return { error: `Update failed: ${e.message}` }
+  } finally {
+    // A download that never reached the swap script is ~200 MB of nothing.
+    if (staged && !staged.error) await update.discard(staged)
   }
 })
 
@@ -850,8 +861,9 @@ function createWindow () {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
+      nodeIntegration: false
+      // sandbox is left at its default (on): the preload needs contextBridge and
+      // ipcRenderer, both of which a sandboxed preload still gets.
     }
   })
 

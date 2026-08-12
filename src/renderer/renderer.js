@@ -94,6 +94,13 @@ const chromeName = dir => chromeProfiles.find(p => p.dir === dir)?.name || dir
 
 let bannerTimer = null
 
+/** Put the banner away and give the list back the room it was holding. */
+function hideBanner () {
+  clearTimeout(bannerTimer)
+  banner.hidden = true
+  setExtra('banner', 0)
+}
+
 /** kind 'info' for "that worked"; the default red is for failures. */
 function showBanner (msg, kind = 'error') {
   banner.textContent = msg
@@ -103,10 +110,7 @@ function showBanner (msg, kind = 'error') {
   // one, and without this the list below loses exactly that much room.
   setExtra('banner', banner.offsetHeight + 8)
   clearTimeout(bannerTimer)
-  bannerTimer = setTimeout(() => {
-    banner.hidden = true
-    setExtra('banner', 0)
-  }, 6000)
+  bannerTimer = setTimeout(hideBanner, 6000)
 }
 
 function show (name) {
@@ -450,7 +454,11 @@ function mergeStatus (next) {
   const by = new Map(accounts.map(a => [a.id, a]))
   return next.map(a => {
     const old = by.get(a.id)
-    return old ? { running: old.running, sessions: old.sessions, exists: old.exists, ...a } : a
+    // usage belongs here with the rest: the undecorated lists carry no reading,
+    // so leaving it out blanks the meter until the next poll two seconds later.
+    return old
+      ? { running: old.running, sessions: old.sessions, exists: old.exists, usage: old.usage, ...a }
+      : a
   })
 }
 
@@ -754,8 +762,7 @@ function renderHealth () {
         }
         card.classList.add('restored')
         btn.textContent = 'Restored'
-        showBanner('')
-        $('#banner').hidden = true
+        hideBanner()
       }
       card.append(btn)
       group.append(card)
@@ -1289,6 +1296,17 @@ async function openSettings () {
       btn.disabled = false
       return
     }
+    if (res.unverifiable) {
+      // Newer, but nothing to check it against, so it is named rather than
+      // offered — saying "up to date" here would be untrue. Naming a release and
+      // then offering no way to reach it would be its own dead end, so the
+      // button becomes the way out.
+      state.textContent = `Version ${res.version} is out, but has no published checksum, so it will not be installed here.`
+      btn.textContent = 'Open releases page'
+      btn.disabled = false
+      btn.onclick = () => window.api.updatePage()
+      return
+    }
     if (!res.available) {
       state.textContent = `Version ${res.current} is the latest.`
       btn.disabled = false
@@ -1312,13 +1330,13 @@ async function openSettings () {
         state.textContent = `Downloading… ${Math.round(p * 100)}%`
       })
       const out = await window.api.updateInstall()
+      off()
       if (out?.error) {
         state.textContent = out.error
         btn.disabled = false
         return
       }
       state.textContent = 'Installing — CASE will reopen in a moment.'
-      void off
     }
   }
 

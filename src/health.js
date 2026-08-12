@@ -27,6 +27,11 @@ const os = require('node:os')
 const PROJECTS = path.join(os.homedir(), '.claude', 'projects')
 const KEEP_BACKUPS = 10
 
+// The profile Claude uses with no CLAUDE_USER_DATA_DIR set, and where Electron
+// leaves that profile's log.
+const DEFAULT_PROFILE = path.join(os.homedir(), 'Library', 'Application Support', 'Claude')
+const SHARED_LOG = path.join(os.homedir(), 'Library', 'Logs', 'Claude', 'main.log')
+
 // ------------------------------------------------------------------ file io ---
 
 /** Read the first `bytes` of a file as text, without pulling in a 14 MB transcript. */
@@ -146,11 +151,15 @@ const FAIL_RE = /^(\S+ \S+) \[error\] Failed to save session (local_[0-9a-f-]+):
  * what separates a genuinely lost session from an ordinary CLI transcript.
  */
 function readLog (profile) {
-  // Profiles launched with CLAUDE_USER_DATA_DIR get <profile>/Logs. The default
-  // profile has no override, so Electron leaves its log in ~/Library/Logs/Claude.
+  // Profiles launched with CLAUDE_USER_DATA_DIR get <profile>/Logs. Only the
+  // default profile falls back to the shared log, and only it may: for any other
+  // profile a missing log means the account has not been opened yet, and reading
+  // the shared one would report the default profile's sessions as this account's
+  // — every one of them missing from an index that does not exist yet.
   const own = path.join(profile, 'Logs', 'main.log')
-  const fallback = path.join(os.homedir(), 'Library', 'Logs', 'Claude', 'main.log')
-  const file = fs.existsSync(own) ? own : fallback
+  const file = !fs.existsSync(own) && profile === DEFAULT_PROFILE ? SHARED_LOG : own
+  // readTail answers '' for a file that is not there, so an unopened account
+  // comes back with nothing to report rather than someone else's history.
   const text = readTail(file, 8 * 1024 * 1024)
 
   const mappings = new Map()      // cliSessionId -> localId
