@@ -1,9 +1,9 @@
 'use strict'
 
 const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, Notification, globalShortcut } = require('electron')
-const { execFile } = require('node:child_process')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
+const os = require('node:os')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const health = require('./health')
@@ -11,14 +11,30 @@ const usage = require('./usage')
 const archive = require('./archive')
 const update = require('./update')
 const chrome = require('./chrome')
-const macos = require('./macos')
+const platform = require('./platform')
 const tray = require('./tray')
+
+const WIN = process.platform === 'win32'
 
 // Claude Desktop reads CLAUDE_USER_DATA_DIR at startup and calls
 // app.setPath('userData', ...) with it, so a profile directory *is* an account.
 // There is no single-instance lock in the bundle, so profiles run side by side.
-const SUPPORT = app.getPath('appData')            // ~/Library/Application Support
+//
+// appData is ~/Library/Application Support on a Mac and %APPDATA% on Windows,
+// which is where Claude keeps its own default profile on both.
+const SUPPORT = app.getPath('appData')
 const DEFAULT_PROFILE = path.join(SUPPORT, 'Claude')
+
+// Where a profile CASE creates goes, and everywhere one might already be.
+//
+// On Windows that is deliberately not %APPDATA%: a Chromium profile runs to
+// several gigabytes, and Roaming is synchronised at logon on a domain-joined
+// machine and swept up by OneDrive's folder redirection. Claude's own default
+// profile stays where Claude put it; only new ones land in Local.
+const PROFILE_ROOT = WIN
+  ? (process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'))
+  : SUPPORT
+const PROFILE_ROOTS = [...new Set([SUPPORT, PROFILE_ROOT])]
 // Electron's own userData directory — SUPPORT/<productName>. Asked for rather
 // than spelled out, so renaming the app cannot silently move the config.
 const CONF_DIR = app.getPath('userData')
@@ -72,7 +88,7 @@ function readConfig () {
 }
 
 const DEFAULT_SETTINGS = {
-  hotkey: 'Alt+Command+C',
+  hotkey: platform.DEFAULT_HOTKEY,
   hotkeyEnabled: true,
   menuBar: true,
   hideDock: false,
@@ -82,6 +98,15 @@ const DEFAULT_SETTINGS = {
   // Checks only — nothing is ever downloaded or installed without being asked.
   autoUpdateCheck: true,
   lastUpdateCheck: 0
+}
+
+/**
+ * Whether CASE starts at login. Windows matches its Run-key entry on the path
+ * and arguments it was written with, so the same options have to reach the read
+ * as reached the write, or it answers no however it was set.
+ */
+function openAtLogin () {
+  try { return app.getLoginItemSettings(platform.loginItemOptions()).openAtLogin } catch { return false }
 }
 
 function readRaw () {
@@ -136,44 +161,35 @@ function touchAccount (id) {
   writeConfig(accounts)
 }
 
+// Claude's own, and not an account: on Windows it keeps the third-party config
+// library in %LOCALAPPDATA%\Claude-3p, which the prefix scan below would
+// otherwise offer up as an account called "3p".
+const NOT_A_PROFILE = new Set(['Claude-3p'])
+
 /** Profiles present on disk that the config does not know about yet. */
 function discoverProfiles () {
   const found = []
   if (fs.existsSync(DEFAULT_PROFILE)) {
     found.push({ name: 'Main', dir: DEFAULT_PROFILE, isDefault: true })
   }
-  let entries = []
-  try { entries = fs.readdirSync(SUPPORT, { withFileTypes: true }) } catch {}
-  for (const e of entries) {
-    if (!e.isDirectory() || !e.name.startsWith('Claude-')) continue
-    // An archived profile is deliberately set aside; offering it back here
-    // would undo the archive by accident.
-    if (archive.isArchivePath(e.name)) continue
-    found.push({ name: e.name.slice('Claude-'.length), dir: path.join(SUPPORT, e.name), isDefault: false })
+  for (const root of PROFILE_ROOTS) {
+    let entries = []
+    try { entries = fs.readdirSync(root, { withFileTypes: true }) } catch {}
+    for (const e of entries) {
+      if (!e.isDirectory() || !e.name.startsWith('Claude-')) continue
+      if (NOT_A_PROFILE.has(e.name)) continue
+      // An archived profile is deliberately set aside; offering it back here
+      // would undo the archive by accident.
+      if (archive.isArchivePath(e.name)) continue
+      found.push({ name: e.name.slice('Claude-'.length), dir: path.join(root, e.name), isDefault: false })
+    }
   }
   return found
 }
 
 // ----------------------------------------------------------------- probing ---
 
-function run (cmd, args, timeout = 4000) {
-  return new Promise(resolve => {
-    execFile(cmd, args, { timeout }, (err, stdout) =>
-      resolve({ ok: !err, out: stdout || '' }))
-  })
-}
-
-// macOS hides process environments, so there is no way to ask a running Claude
-// which profile it uses. The profile's own open files are the reliable signal.
-async function isRunning (dir) {
-  const probes = ['Cookies', 'Local Storage/leveldb/LOCK', 'Network Persistent State']
-    .map(p => path.join(dir, p))
-    .filter(f => fs.existsSync(f))
-  if (!probes.length) return false
-  // Probe in parallel: lsof is the slowest thing this app does.
-  const results = await Promise.all(probes.map(f => run('/usr/sbin/lsof', ['--', f], 2500)))
-  return results.some(r => r.ok)
-}
+const isRunning = dir => platform.isRunning(dir)
 
 async function sessionCount (dir) {
   const root = path.join(dir, 'claude-code-sessions')
@@ -206,9 +222,9 @@ async function launchAccount (account) {
   touchAccount(account.id)
 
   if (await isRunning(account.dir)) {
-    // Two instances on one profile corrupt its LevelDB stores. macOS cannot
-    // raise a specific instance of a bundle, so this fronts the current one.
-    await run('/usr/bin/osascript', ['-e', 'tell application "Claude" to activate'])
+    // Two instances on one profile corrupt its LevelDB stores, so this fronts
+    // the one already open rather than starting a second.
+    await platform.activateProfile(account.dir)
     await openPairedChrome(account)
     return { ok: true, alreadyRunning: true }
   }
@@ -219,13 +235,9 @@ async function launchAccount (account) {
 
   fs.mkdirSync(account.dir, { recursive: true })
 
-  const args = ['-n', '-a', 'Claude']
-  if (account.dir !== DEFAULT_PROFILE) {
-    args.push('--env', `CLAUDE_USER_DATA_DIR=${account.dir}`)
-  }
-  const { ok } = await run('/usr/bin/open', args, 15000)
+  const { ok, error } = await platform.launchClaude(account.dir, account.dir === DEFAULT_PROFILE)
   await openPairedChrome(account)
-  return { ok, alreadyRunning: false }
+  return { ok, error, alreadyRunning: false }
 }
 
 /** Bring the account's browser context along, if one is paired and enabled. */
@@ -241,7 +253,7 @@ function slug (name) {
 }
 
 function uniqueDir (name) {
-  const base = path.join(SUPPORT, `Claude-${slug(name)}`)
+  const base = path.join(PROFILE_ROOT, `Claude-${slug(name)}`)
   let dir = base
   for (let i = 2; fs.existsSync(dir); i++) dir = `${base}-${i}`
   return dir
@@ -421,7 +433,7 @@ ipcMain.handle('accounts:archive', async (_e, id) => {
   // and the picker's own menu already spelled out what it does. The native
   // warnings are kept for the two paths that cannot be undone.
   const bytes = await archive.size(a.dir)
-  const res = archive.archive(a, bytes)
+  const res = await archive.archive(a, bytes)
   if (res.error) return res
 
   const next = accounts.filter(x => x.id !== id)
@@ -442,7 +454,7 @@ ipcMain.handle('archive:restore', async (_e, id) => {
   const r = records.find(x => x.id === id)
   if (!r) return { error: 'That archive is no longer listed.' }
 
-  const res = archive.restore(r)
+  const res = await archive.restore(r)
   if (res.error) return res
 
   const accounts = currentAccounts()
@@ -528,8 +540,7 @@ ipcMain.handle('settings:get', async () => ({
   packaged: app.isPackaged,
   hotkeyActive: Boolean(currentHotkey),
   menuBarActive: tray.isEnabled(),
-  dockVisible: process.platform === 'darwin' && app.dock ? app.dock.isVisible() : true,
-  openAtLogin: app.getLoginItemSettings().openAtLogin
+  openAtLogin: openAtLogin()
 }))
 
 ipcMain.handle('settings:setHotkey', async (_e, { hotkey, enabled }) => {
@@ -558,22 +569,21 @@ ipcMain.handle('settings:setSorting', async (_e, sortByRecent) => {
 })
 
 ipcMain.handle('settings:setLoginItem', async (_e, enabled) => {
-  app.setLoginItemSettings({
-    openAtLogin: Boolean(enabled),
-    openAsHidden: true,
-    args: ['--hidden']
-  })
-  return { openAtLogin: app.getLoginItemSettings().openAtLogin }
+  app.setLoginItemSettings({ openAtLogin: Boolean(enabled), ...platform.loginItemOptions() })
+  return { openAtLogin: openAtLogin() }
 })
 
-ipcMain.handle('dock:status', async () => ({ pinned: await macos.isPinned() }))
+// Both platforms answer both channels; only the words differ. Keeping them
+// symmetrical is not tidiness — tools/check.js fails a channel one side never
+// calls, so a Windows-only "shortcut:create" would not survive CI.
+ipcMain.handle('shortcut:status', async () => platform.shortcutStatus())
 
-ipcMain.handle('dock:pin', async () => macos.pinToDock())
+ipcMain.handle('shortcut:create', async () => platform.shortcutCreate())
 
 ipcMain.handle('accounts:quit', async (_e, id) => {
   const a = currentAccounts().find(x => x.id === id)
   if (!a) return { error: 'Account not found.' }
-  return macos.quitProfile(a.dir, f => fs.existsSync(f))
+  return platform.quitProfile(a.dir)
 })
 
 ipcMain.handle('chrome:list', async (_e, accountId) => {
@@ -613,7 +623,13 @@ ipcMain.handle('health:reveal', async (_e, target) => {
   if (target) shell.showItemInFolder(target)
 })
 
-ipcMain.handle('app:claudeInstalled', () => fs.existsSync('/Applications/Claude.app'))
+// The reason travels with the answer: "not installed" and "installed, but from
+// the Microsoft Store, which cannot be given its own profile" need different
+// words, and only the platform knows which applies.
+ipcMain.handle('app:claudeInstalled', () => ({
+  installed: platform.claudeInstalled(),
+  hint: platform.claudeHint()
+}))
 
 // -------------------------------------------------------------- self-update ---
 
@@ -676,9 +692,22 @@ function registerHotkey (accel) {
   return { ok, registered: ok, error: ok ? null : 'That shortcut is already taken by another app.' }
 }
 
+/**
+ * A stored accelerator this platform can actually register.
+ *
+ * A config file written on a Mac names Command, which does not exist on a
+ * Windows keyboard — register() would refuse it and report the shortcut as taken
+ * by another app, which is both wrong and unfixable from the settings sheet.
+ */
+function usableHotkey (accel) {
+  if (!accel) return accel
+  const foreign = WIN ? /\bCommand\b/ : /\bSuper\b/
+  return foreign.test(accel) ? platform.DEFAULT_HOTKEY : accel
+}
+
 function applyHotkeyFromSettings () {
   const s = readSettings()
-  return registerHotkey(s.hotkeyEnabled ? s.hotkey : null)
+  return registerHotkey(s.hotkeyEnabled ? usableHotkey(s.hotkey) : null)
 }
 
 // -------------------------------------------------------------- menu bar ---
@@ -709,15 +738,19 @@ const TRAY_DEPS = {
 
 /**
  * Apply the menu-bar / Dock presentation. Hiding the Dock icon is only offered
- * alongside the menu bar — without either, the app would have no way back.
+ * alongside the menu bar — without either, the app would have no way back. The
+ * Windows equivalent of a hidden Dock tile is a window kept off the taskbar.
  */
 async function applyPresentation () {
   const s = readSettings()
   if (s.menuBar) await tray.enable(TRAY_DEPS)
   else tray.disable()
 
-  if (process.platform === 'darwin' && app.dock) {
-    if (s.menuBar && s.hideDock) app.dock.hide()
+  const hide = Boolean(s.menuBar && s.hideDock)
+  if (WIN) {
+    if (win && !win.isDestroyed()) win.setSkipTaskbar(hide)
+  } else if (app.dock) {
+    if (hide) app.dock.hide()
     else app.dock.show()
   }
 }
@@ -804,7 +837,7 @@ async function healthTick ({ first = false } = {}) {
 
   const n = issueCount(data)
   lastIssueCount = n
-  if (process.platform === 'darwin' && app.dock) app.dock.setBadge(n ? String(n) : '')
+  platform.setBadge(win, n)
   tray.refresh()
   if (win && !win.isDestroyed()) win.webContents.send('health:update', data)
 
@@ -848,6 +881,16 @@ function preferredHeight () {
   return Math.max(260, Math.min(760, CHROME + stored.length * 66 + extraHeight))
 }
 
+// The custom titlebar has no close button of its own, so on Windows the caption
+// controls are drawn into it as an overlay. These colours are the --bg and
+// --text of src/renderer/styles.css; there is no way to hand the OS a CSS
+// variable, so the two have to be changed together.
+const overlay = () => ({
+  color: nativeTheme.shouldUseDarkColors ? '#1b1b1f' : '#f6f5f3',
+  symbolColor: nativeTheme.shouldUseDarkColors ? '#eceae6' : '#1f1e1c',
+  height: 52
+})
+
 function createWindow () {
   win = new BrowserWindow({
     width: 440,
@@ -855,8 +898,11 @@ function createWindow () {
     minWidth: 380,
     minHeight: 240,
     show: false,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 14, y: 18 },
+    // 'hiddenInset' on Windows would take the caption bar away and put nothing
+    // back, leaving a window that cannot be closed.
+    ...(WIN
+      ? { titleBarStyle: 'hidden', titleBarOverlay: overlay() }
+      : { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 18 } }),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#1b1b1f' : '#f6f5f3',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -886,25 +932,53 @@ function createWindow () {
   })
   // With a global hotkey (or launch-at-login) the app must outlive its window,
   // or the shortcut dies the first time the window is dismissed.
+  //
+  // currentHotkey, not the setting: a shortcut that failed to register is one
+  // another app already owns, and hiding the window on the strength of a
+  // shortcut that does nothing leaves no way back into an app with no tray.
   win.on('close', e => {
     if (isQuitting) return
-    const s = readSettings()
-    let atLogin = false
-    try { atLogin = app.getLoginItemSettings().openAtLogin } catch {}
-    if (s.hotkeyEnabled || atLogin) { e.preventDefault(); win.hide() }
+    if (currentHotkey || openAtLogin()) { e.preventDefault(); win.hide() }
   })
 
   win.on('closed', () => { win = null })
 }
 
+// Windows has no `activate` event, so without this a second click on the Start
+// menu entry starts a second launcher — two processes writing accounts.json.
+// macOS gets this from LaunchServices, where the lock is simply always ours.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => openWindow())
+}
+
 app.whenReady().then(() => {
+  // Windows never reports wasOpenedAtLogin, which is what the --hidden argument
+  // in loginItemOptions() is for.
   try { startHidden = startHidden || app.getLoginItemSettings().wasOpenedAtLogin } catch {}
+  // Notifications are dropped outright for an app Windows cannot tie to a Start
+  // menu shortcut, and it matches them up by this id. Set before any window, and
+  // the same string shortcutCreate() writes into the .lnk.
+  app.setAppUserModelId('local.launcher.case')
   createWindow()
   applyHotkeyFromSettings()
   applyPresentation()
   startWatching()
   // Behind the first paint: an update check is never worth delaying the window.
   setTimeout(() => { updateTick().catch(() => {}) }, 4000)
+
+  // The caption buttons are painted by Windows, not by the stylesheet, so they
+  // have to be repainted by hand when the theme changes. The tray icon on
+  // Windows is picked from the same event, one file per taskbar theme.
+  if (WIN) {
+    nativeTheme.on('updated', () => {
+      if (win && !win.isDestroyed()) win.setTitleBarOverlay(overlay())
+      platform.forgetTheme()
+      tray.reload()
+    })
+  }
+
   // The window survives a pick (hidden, not closed), so clicking the Dock icon
   // has to reveal it rather than only rebuild a window that was never gone.
   app.on('activate', () => {

@@ -38,8 +38,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   setPresentation: (menuBar, hideDock) => ipcRenderer.invoke('settings:setPresentation', { menuBar, hideDock }),
   onShowSettings: cb => ipcRenderer.on('settings:show', () => cb()),
-  dockStatus: () => ipcRenderer.invoke('dock:status'),
-  dockPin: () => ipcRenderer.invoke('dock:pin'),
+  shortcutStatus: () => ipcRenderer.invoke('shortcut:status'),
+  shortcutCreate: () => ipcRenderer.invoke('shortcut:create'),
   quitAccount: id => ipcRenderer.invoke('accounts:quit', id),
   chromeList: accountId => ipcRenderer.invoke('chrome:list', accountId),
   chromePair: (accountId, dir, openOnLaunch) => ipcRenderer.invoke('chrome:pair', { accountId, dir, openOnLaunch }),
@@ -50,5 +50,8 @@ contextBridge.exposeInMainWorld('api', {
   onShowHealth: cb => ipcRenderer.on('health:show', () => cb()),
   rebuildSession: (accountId, orphan) => ipcRenderer.invoke('health:rebuild', { accountId, orphan }),
   revealPath: target => ipcRenderer.invoke('health:reveal', target),
-  claudeInstalled: () => ipcRenderer.invoke('app:claudeInstalled')
+  claudeInstalled: () => ipcRenderer.invoke('app:claudeInstalled'),
+  // Not an IPC call: the renderer needs this on every keystroke to tell Ctrl
+  // from Command, and a sandboxed preload still gets process.platform.
+  platform: process.platform
 })

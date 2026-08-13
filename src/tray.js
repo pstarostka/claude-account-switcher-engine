@@ -3,19 +3,11 @@
 // Menu-bar mode: the whole picker as a menu, so switching account never needs a
 // window at all.
 
-const { Tray, Menu, nativeImage } = require('electron')
-const path = require('node:path')
+const { Tray, Menu } = require('electron')
+const platform = require('./platform')
 
 let tray = null
 let deps = null
-
-function icon () {
-  const img = nativeImage.createFromPath(path.join(__dirname, 'assets', 'trayTemplate.png'))
-  // Template images are recoloured by macOS to suit the menu bar, including
-  // when it inverts for dark mode or a highlighted menu.
-  img.setTemplateImage(true)
-  return img
-}
 
 async function buildMenu () {
   const { accounts, issues } = await deps.getState()
@@ -35,12 +27,17 @@ async function buildMenu () {
     { label: 'Settings…', click: deps.onOpenSettings },
     { label: 'Open CASE', click: deps.onOpenWindow },
     { type: 'separator' },
-    { label: 'Quit CASE', accelerator: 'Command+Q', click: deps.onQuit }
+    { label: 'Quit CASE', accelerator: platform.QUIT_ACCEL, click: deps.onQuit }
   ])
 }
 
+// Windows pops the menu itself, from a fresh build on each click; macOS wants a
+// menu already attached and rebuilds it on mouse-down. Setting a context menu on
+// Windows too would mean the menu opens before the rebuild it triggered lands.
+const WIN = process.platform === 'win32'
+
 async function refresh () {
-  if (!tray || tray.isDestroyed()) return
+  if (!tray || tray.isDestroyed() || WIN) return
   try { tray.setContextMenu(await buildMenu()) } catch {}
 }
 
@@ -48,12 +45,26 @@ async function enable (dependencies) {
   deps = dependencies || deps
   if (tray && !tray.isDestroyed()) return refresh()
 
-  tray = new Tray(icon())
+  tray = new Tray(await platform.trayImage())
   tray.setToolTip('CASE — Claude Account Switcher Engine')
   await refresh()
 
   // Rebuild on open so running state is current, not as of the last poll.
-  tray.on('mouse-down', refresh)
+  // mouse-down never fires on Windows, so there the click events do it — and
+  // without this the menu would quietly show whatever was true at startup.
+  if (WIN) {
+    const pop = async () => { try { tray.popUpContextMenu(await buildMenu()) } catch {} }
+    tray.on('click', pop)
+    tray.on('right-click', pop)
+  } else {
+    tray.on('mouse-down', refresh)
+  }
+}
+
+/** Swap in a fresh icon, for a theme change. Windows picks one per taskbar theme. */
+async function reload () {
+  if (!tray || tray.isDestroyed()) return
+  try { tray.setImage(await platform.trayImage()) } catch {}
 }
 
 function disable () {
@@ -63,4 +74,4 @@ function disable () {
 
 const isEnabled = () => Boolean(tray && !tray.isDestroyed())
 
-module.exports = { enable, disable, refresh, isEnabled }
+module.exports = { enable, disable, refresh, reload, isEnabled }

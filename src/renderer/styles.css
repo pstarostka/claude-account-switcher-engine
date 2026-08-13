@@ -50,7 +50,8 @@ body {
   flex-direction: column;
   background: var(--bg);
   color: var(--text);
-  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+        "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
   user-select: none;
@@ -67,6 +68,15 @@ body {
   align-items: center;
   justify-content: center;
   border-bottom: 1px solid transparent;
+}
+
+/* Windows paints its caption buttons over the top-right of the window and tells
+   the page where, through these environment variables. Without them the centred
+   title is centred on the whole width and slides under the close button. */
+body.win .titlebar {
+  height: env(titlebar-area-height, 52px);
+  margin-left: env(titlebar-area-x, 0);
+  width: env(titlebar-area-width, 100%);
 }
 
 .titlebar-title {
@@ -243,7 +253,7 @@ body {
 .setup-intro h1 { font-size: 17px; font-weight: 650; margin-bottom: 6px; }
 .setup-intro p { color: var(--muted); font-size: 12.5px; }
 .setup-intro code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace;
   font-size: 11.5px;
   background: color-mix(in srgb, var(--text) 8%, transparent);
   padding: 1px 4px;
@@ -402,7 +412,7 @@ body {
 .note strong { font-weight: 650; }
 
 .note code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace;
   font-size: 11px;
   background: color-mix(in srgb, var(--text) 9%, transparent);
   padding: 1px 4px;
@@ -414,7 +424,7 @@ body {
 .orphan .card-body { padding-top: 1px; }
 .orphan .card-sub { white-space: normal; }
 .orphan .path {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace;
   font-size: 10.5px;
   color: var(--faint);
   margin-top: 3px;

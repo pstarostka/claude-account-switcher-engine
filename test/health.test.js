@@ -11,18 +11,26 @@ const os = require('node:os')
 const path = require('node:path')
 
 // health.js resolves ~/.claude, the default profile and the shared log when it
-// loads, so the fixture and HOME both have to be in place before the require.
+// loads, so the fixture and the home directory both have to be in place before
+// the require — USERPROFILE and APPDATA alongside HOME, because which of them
+// os.homedir() reads depends on the platform this is running on.
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'case-health-'))
 process.env.HOME = HOME
+process.env.USERPROFILE = HOME
+process.env.APPDATA = path.join(HOME, 'AppData', 'Roaming')
 
-const SUPPORT = path.join(HOME, 'Library', 'Application Support')
-const DEFAULT_PROFILE = path.join(SUPPORT, 'Claude')
+const health = require('../src/health.js')
+
+// Taken from health.js rather than spelled out again: the layout differs by
+// platform, and a second copy of it here would only ever test itself.
+const DEFAULT_PROFILE = health.DEFAULT_PROFILE
+const SUPPORT = path.dirname(DEFAULT_PROFILE)
 const UNOPENED = path.join(SUPPORT, 'Claude-Unopened')
 const CLI_ID = '11111111-2222-3333-4444-555555555555'
 
 // The shared log records one desktop session…
-fs.mkdirSync(path.join(HOME, 'Library', 'Logs', 'Claude'), { recursive: true })
-fs.writeFileSync(path.join(HOME, 'Library', 'Logs', 'Claude', 'main.log'),
+fs.mkdirSync(path.dirname(health.SHARED_LOG), { recursive: true })
+fs.writeFileSync(health.SHARED_LOG,
   `2026-08-12 10:00:00 [info] Mapping internal session local_abc to CLI session ${CLI_ID}\n`)
 
 // …the default profile has an index that does not mention it…
@@ -36,8 +44,6 @@ fs.writeFileSync(path.join(HOME, '.claude', 'projects', 'proj', `${CLI_ID}.jsonl
 
 // A second account, added but never opened: no log of its own, and no index.
 fs.mkdirSync(UNOPENED, { recursive: true })
-
-const health = require('../src/health.js')
 
 const scan = () => health.scan([
   { id: 'default', name: 'Main', dir: DEFAULT_PROFILE },
@@ -74,6 +80,26 @@ test('a session already in the index is not reported as lost', async () => {
     assert.equal(find(accounts, 'default').orphans.length, 0)
   } finally {
     fs.rmSync(entry)
+  }
+})
+
+test('a log with Windows line endings reads the same as any other', async () => {
+  // Claude writes this log on Windows too. Splitting on \n alone left a \r on
+  // the end of every line: it trailed into the reason shown in the UI, and it
+  // sat between the reason and the `$` the failure pattern anchors on, so no
+  // failure was ever recognised.
+  const saved = fs.readFileSync(health.SHARED_LOG)
+  fs.writeFileSync(health.SHARED_LOG,
+    `2026-08-12 10:00:00 [info] Mapping internal session local_abc to CLI session ${CLI_ID}\r\n` +
+    '2026-08-12 10:01:00 [error] Failed to save session local_abc: ENOTDIR: not a directory\r\n')
+  try {
+    const main = find((await scan()).accounts, 'default')
+    assert.equal(main.orphans.length, 1, 'the mapping is still found')
+    assert.equal(main.failures?.count, 1, 'and so is the failure that follows it')
+    assert.equal(main.failures.reason, 'ENOTDIR: not a directory',
+      'with no carriage return left on the end of the reason')
+  } finally {
+    fs.writeFileSync(health.SHARED_LOG, saved)
   }
 })
 

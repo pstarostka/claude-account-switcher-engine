@@ -4,12 +4,18 @@
 // does the SVG work — no image dependency, and it is the same renderer the app
 // itself draws with.
 //
+//   rasterize-icon.js <svg> <out.png> <sizes-csv> [mac|win]
+//
 // Two things happen here that a plain SVG-to-PNG would not do:
 //
-//  * The art is inset to Apple's macOS icon grid. A full-bleed square would sit
-//    in the Dock as a square tile among everyone else's squircles.
+//  * On macOS the art is inset to Apple's icon grid. A full-bleed square would
+//    sit in the Dock as a square tile among everyone else's squircles.
 //  * The squircle is clipped with border-radius, so the corners come out
 //    genuinely transparent rather than cream.
+//
+// Windows is the opposite case and wants neither. It does not mask app icons, so
+// an inset squircle there reads as a small icon floating in a hole — the plate
+// becomes the whole square, edge to edge and opaque.
 //
 // Offscreen rendering, because a 1024×1024 window is taller than the screen and
 // macOS would otherwise clamp it and capture a truncated icon.
@@ -17,13 +23,18 @@
 const { app, BrowserWindow } = require('electron')
 const fs = require('node:fs')
 
-const [, , svgPath, outPath, sizeArg] = process.argv
-const SIZE = Number(sizeArg) || 1024
+const [, , svgPath, outPath, sizesArg, mode] = process.argv
+const WIN = mode === 'win'
+
+// Rendered once at full size and stepped down from there. Asking Chromium for a
+// 16px SVG directly turns the drawing to mud; resampling a large one does not.
+const SIZE = 1024
+const SIZES = String(sizesArg || SIZE).split(',').map(Number).filter(Boolean)
 
 // Apple's grid: the rounded square is 824 of 1024, corner radius 185.4.
-const INSET = Math.round((SIZE * 100) / 1024)
+const INSET = WIN ? 0 : Math.round((SIZE * 100) / 1024)
 const ART = SIZE - INSET * 2
-const RADIUS = Math.round((ART * 185.4) / 824)
+const RADIUS = WIN ? 0 : Math.round((ART * 185.4) / 824)
 
 // The drawing inside icon.svg occupies x 330–930, y 263–916 of its 1254 box —
 // about 52% of it, which would leave the Dock icon looking half empty. Scaling
@@ -69,6 +80,12 @@ app.whenReady().then(async () => {
     img = img.resize({ width: SIZE, height: SIZE, quality: 'best' })
   }
 
-  fs.writeFileSync(outPath, img.toPNG())
+  // One size keeps the plain name, so the macOS path is unchanged; a set gets
+  // the size appended, which is what the .ico packer reads back.
+  for (const s of SIZES) {
+    const out = s === SIZE ? img : img.resize({ width: s, height: s, quality: 'best' })
+    const file = SIZES.length === 1 ? outPath : outPath.replace(/\.png$/, `-${s}.png`)
+    fs.writeFileSync(file, out.toPNG())
+  }
   app.exit(0)
 })
