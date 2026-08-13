@@ -89,7 +89,9 @@ const HOSTILE = [
   '100% done'
 ]
 
-test('paths reach the sh swap script literally, whatever is in them', () => {
+// Each of these runs only where its shell exists. The quoting is checked as a
+// string everywhere; only actually executing it needs the right machine.
+test('paths reach the sh swap script literally, whatever is in them', { skip: process.platform === 'win32' }, () => {
   const marker = '/tmp/case-quoting-canary'
   for (const p of HOSTILE) {
     const out = execFileSync('/bin/sh', ['-c', `P=${mac.sq(p)}; printf %s "$P"`]).toString()
