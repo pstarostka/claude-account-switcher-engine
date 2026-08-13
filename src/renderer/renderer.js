@@ -2,6 +2,16 @@
 
 const $ = sel => document.querySelector(sel)
 
+// Windows draws its caption buttons over the titlebar and spells its modifiers
+// out rather than drawing them, so a handful of things below have to know.
+const IS_WIN = window.api.platform === 'win32'
+if (IS_WIN) document.body.classList.add('win')
+
+const FILE_MANAGER = IS_WIN ? 'Explorer' : 'Finder'
+// What the shortcut on each card reads: "Ctrl1" would be wrong, so Windows gets
+// the separator its own shortcuts are written with.
+const ACCEL_PREFIX = IS_WIN ? 'Ctrl+' : '⌘'
+
 const views = { setup: $('#setup'), picker: $('#picker'), health: $('#health') }
 const banner = $('#banner')
 
@@ -368,7 +378,7 @@ function renderPicker () {
         <div class="card-name">${esc(a.name)}${a.running ? '<span class="dot"></span>' : ''}</div>
         <div class="card-sub">${esc(subtitle(a))}</div>
       </div>
-      ${idx < 9 ? `<span class="num">\u2318${idx + 1}</span>` : ''}
+      ${idx < 9 ? `<span class="num">${ACCEL_PREFIX}${idx + 1}</span>` : ''}
       <div class="card-actions">
         ${a.running ? `<button class="iconbtn" data-act="quit" aria-label="Quit"
                 data-tip="Quit only this account, leaving the others running">${svg('power')}</button>` : ''}
@@ -376,8 +386,8 @@ function renderPicker () {
                 data-tip="Rename it, or give it an icon and a colour">${svg('pencil')}</button>
         <button class="iconbtn" data-act="chrome" aria-label="Chrome profile"
                 data-tip="${a.chrome?.dir ? `Opens Chrome “${esc(chromeName(a.chrome.dir))}” with this account` : 'Pair a Chrome profile to open alongside this account'}">${svg('globe')}</button>
-        <button class="iconbtn" data-act="reveal" aria-label="Show in Finder"
-                data-tip="Show this account’s profile folder in Finder">${svg('folder')}</button>
+        <button class="iconbtn" data-act="reveal" aria-label="Show in ${FILE_MANAGER}"
+                data-tip="Show this account’s profile folder in ${FILE_MANAGER}">${svg('folder')}</button>
         <button class="iconbtn danger" data-act="remove" aria-label="Remove"
                 data-tip="Remove from this list, or delete the profile and its data">${svg('trash')}</button>
       </div>`
@@ -662,9 +672,10 @@ window.addEventListener('keydown', e => {
 })
 
 ;(async () => {
-  if (!(await window.api.claudeInstalled())) {
-    showBanner('Claude is not installed in /Applications — accounts cannot be launched.')
-  }
+  // The hint comes from the main process: "not installed" and "installed from
+  // the Microsoft Store" are different problems with different answers.
+  const claude = await window.api.claudeInstalled()
+  if (!claude.installed) showBanner(claude.hint)
   await refresh()
   // Keep the running indicators honest while the window is open.
   refreshTimer = setInterval(() => {
@@ -893,7 +904,7 @@ function listModal ({ title, note = '', rows, selected = null, ok = 'Save', extr
 
 async function doChrome (a) {
   const info = await window.api.chromeList(a.id)
-  if (!info.installed) return showBanner('Google Chrome is not installed in /Applications.')
+  if (!info.installed) return showBanner('Google Chrome is not installed.')
 
   const current = info.current?.dir || info.suggestion || null
 
@@ -1019,7 +1030,11 @@ async function doQuit (a) {
   setTimeout(pullStatus, 1500)
 }
 
-// ---------------------------------------------------------- keep in dock ---
+// ------------------------------------------------------- keep it to hand ---
+
+// Pinning to the Dock and adding a Start menu entry are the same offer in
+// different words, so the words travel with the answer rather than living here.
+let shortcutCta = ''
 
 function setPinNote (show) {
   $('#pin-note').hidden = !show
@@ -1029,8 +1044,12 @@ function setPinNote (show) {
 async function refreshPinNote () {
   if (sessionStorage.getItem('pin-dismissed')) return
   try {
-    const { pinned } = await window.api.dockStatus()
-    setPinNote(!pinned)
+    const s = await window.api.shortcutStatus()
+    shortcutCta = s.cta
+    $('#pin-note span').textContent = s.blurb
+    $('#pin-do').textContent = s.cta
+    $('#pin-do').dataset.tip = s.tip
+    setPinNote(s.supported && !s.present)
   } catch {}
 }
 
@@ -1038,11 +1057,11 @@ $('#pin-do').addEventListener('click', async () => {
   const btn = $('#pin-do')
   btn.disabled = true
   btn.textContent = 'Adding…'
-  const res = await window.api.dockPin()
+  const res = await window.api.shortcutCreate()
   btn.disabled = false
-  btn.textContent = 'Keep in Dock'
+  btn.textContent = shortcutCta
   if (res.ok) setPinNote(false)
-  else showBanner(res.error || 'Could not add it to the Dock.')
+  else showBanner(res.error || 'Could not add the shortcut.')
 })
 
 $('#pin-dismiss').addEventListener('click', () => {
@@ -1064,7 +1083,9 @@ document.addEventListener('keydown', e => {
   // Never steal keys from a dialog, and only drive the list while it is showing.
   if (!modal.root.hidden || views.picker.hidden) return
 
-  if (e.metaKey && /^[1-9]$/.test(e.key)) {
+  // Ctrl is the accelerator key on Windows, Command on a Mac. The guard below
+  // stays as it is: neither platform wants a modified key driving the list.
+  if ((IS_WIN ? e.ctrlKey : e.metaKey) && /^[1-9]$/.test(e.key)) {
     const a = accounts[Number(e.key) - 1]
     if (a) { e.preventDefault(); selectedIndex = Number(e.key) - 1; doLaunch(a) }
     return
@@ -1085,15 +1106,23 @@ refreshPinNote()
 // ---------------------------------------------------------------- settings ---
 
 const KEY_SYMBOL = { Command: '\u2318', Alt: '\u2325', Shift: '\u21e7', Control: '\u2303' }
+const KEY_WORD = { Control: 'Ctrl', Alt: 'Alt', Shift: 'Shift', Super: 'Win' }
 
-/** Electron accelerator ("Alt+Command+C") rendered the way a Mac shows it. */
+/** An Electron accelerator, written the way this platform writes one. */
 function prettyAccel (accel) {
   if (!accel) return 'Off'
   const parts = accel.split('+')
   const key = parts.pop()
+  const shown = key.length === 1 ? key.toUpperCase() : key
+
+  // Windows spells its modifiers out and puts a separator between them; macOS
+  // draws them as glyphs, run together, in its own fixed order.
+  if (IS_WIN) {
+    const order = ['Control', 'Alt', 'Shift', 'Super']
+    return [...order.filter(m => parts.includes(m)).map(m => KEY_WORD[m]), shown].join('+')
+  }
   const order = ['Control', 'Alt', 'Shift', 'Command']
-  const mods = order.filter(m => parts.includes(m)).map(m => KEY_SYMBOL[m]).join('')
-  return mods + (key.length === 1 ? key.toUpperCase() : key)
+  return order.filter(m => parts.includes(m)).map(m => KEY_SYMBOL[m]).join('') + shown
 }
 
 /** Build an accelerator from a keydown. Returns null until a usable combo lands. */
@@ -1102,7 +1131,9 @@ function accelFromEvent (e) {
   if (e.ctrlKey) mods.push('Control')
   if (e.altKey) mods.push('Alt')
   if (e.shiftKey) mods.push('Shift')
-  if (e.metaKey) mods.push('Command')
+  // Meta is the Windows key there, which Electron calls Super. Emitting
+  // "Command" on Windows would produce an accelerator register() refuses.
+  if (e.metaKey) mods.push(IS_WIN ? 'Super' : 'Command')
   if (!mods.length) return null
 
   const k = e.key
@@ -1234,13 +1265,15 @@ async function openSettings () {
     dockSwitch.style.opacity = res.menuBar ? '' : '.4'
   }
 
-  mbSwitch = mkSwitch('Show in the menu bar',
+  mbSwitch = mkSwitch(IS_WIN ? 'Show in the notification area' : 'Show in the menu bar',
     'Pick an account without opening a window.',
     st.menuBar,
     on => applyPresentation(on, dockSwitch.classList.contains('on')))
 
-  dockSwitch = mkSwitch('Hide the Dock icon',
-    'Menu bar only. The pinned Dock shortcut still works.',
+  dockSwitch = mkSwitch(IS_WIN ? 'Hide the taskbar button' : 'Hide the Dock icon',
+    IS_WIN
+      ? 'Notification area only. The Start menu shortcut still works.'
+      : 'Menu bar only. The pinned Dock shortcut still works.',
     st.hideDock,
     on => applyPresentation(mbSwitch.classList.contains('on'), on))
 
@@ -1249,7 +1282,7 @@ async function openSettings () {
 
   // --- ordering ------------------------------------------------------------
   mkSwitch('Sort by most recently used',
-    'The account you opened last moves to the top — and ⌘1–9 move with it.',
+    `The account you opened last moves to the top — and ${IS_WIN ? 'Ctrl+1–9' : '⌘1–9'} move with it.`,
     st.sortByRecent,
     async (on, sw) => {
       const res = await window.api.setSorting(on)

@@ -4,42 +4,40 @@
 //
 // Chrome keeps its profile list in Local State under profile.info_cache, keyed
 // by directory name ("Default", "Profile 8") with the display name and signed-in
-// address alongside. Launching one is just:
-//
-//     open -na "Google Chrome" --args --profile-directory="Profile 8"
+// address alongside. That file, and the "Profile N" naming, are the same on
+// every platform — only where Chrome keeps them differs, and where it is
+// launched from, both of which come from src/platform.
 //
 // Extensions are per-profile, so the Claude extension being present in one
 // profile says nothing about another.
 
 const fs = require('node:fs')
 const path = require('node:path')
-const os = require('node:os')
-const { execFile } = require('node:child_process')
+const platform = require('./platform')
 
-const CHROME_APP = '/Applications/Google Chrome.app'
-const CHROME_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome')
-const LOCAL_STATE = path.join(CHROME_DIR, 'Local State')
+const CHROME_DIR = () => platform.chrome.root()
+const LOCAL_STATE = () => path.join(CHROME_DIR(), 'Local State')
 
 // Claude in Chrome.
 const EXTENSION_ID = 'fcoeoabgfenejglbffodgkkbkcdhcgfn'
 const WEBSTORE_URL = `https://chromewebstore.google.com/detail/${EXTENSION_ID}`
 
-const installed = () => fs.existsSync(CHROME_APP)
+const installed = () => platform.chrome.installed()
 
 function hasExtension (profileDir) {
-  return fs.existsSync(path.join(CHROME_DIR, profileDir, 'Extensions', EXTENSION_ID))
+  return fs.existsSync(path.join(CHROME_DIR(), profileDir, 'Extensions', EXTENSION_ID))
 }
 
 /** Every Chrome profile, newest-used first. */
 function listProfiles () {
   if (!installed()) return []
   let state
-  try { state = JSON.parse(fs.readFileSync(LOCAL_STATE, 'utf8')) } catch { return [] }
+  try { state = JSON.parse(fs.readFileSync(LOCAL_STATE(), 'utf8')) } catch { return [] }
   const cache = state?.profile?.info_cache || {}
   const lastUsed = state?.profile?.last_used
 
   return Object.entries(cache)
-    .filter(([dir]) => fs.existsSync(path.join(CHROME_DIR, dir)))
+    .filter(([dir]) => fs.existsSync(path.join(CHROME_DIR(), dir)))
     .map(([dir, info]) => ({
       dir,
       name: info.name || dir,
@@ -54,7 +52,7 @@ function listProfiles () {
 function nextProfileDir () {
   for (let i = 1; i < 500; i++) {
     const dir = `Profile ${i}`
-    if (!fs.existsSync(path.join(CHROME_DIR, dir))) return dir
+    if (!fs.existsSync(path.join(CHROME_DIR(), dir))) return dir
   }
   return `Profile ${Date.now()}`
 }
@@ -74,18 +72,8 @@ function suggestFor (accountName, profiles) {
          null
 }
 
-function run (args, timeout = 15000) {
-  return new Promise(resolve => {
-    execFile('/usr/bin/open', args, { timeout }, err => resolve({ ok: !err }))
-  })
-}
-
 /** Open a Chrome window on a profile. Creates the profile if it does not exist. */
-function launch (profileDir, url = null) {
-  const args = ['-na', 'Google Chrome', '--args', `--profile-directory=${profileDir}`]
-  if (url) args.push(url)
-  return run(args)
-}
+const launch = (profileDir, url = null) => platform.chrome.launch(profileDir, url)
 
 /** Open the extension's Web Store page in the given profile so it is one click away. */
 function openExtensionPage (profileDir) {

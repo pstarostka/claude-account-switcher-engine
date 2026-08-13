@@ -33,9 +33,11 @@
 
   <!-- main picker ----------------------------------------------------------->
   <main id="picker" class="view" hidden>
+    <!-- Copy is filled in from shortcut:status: the Dock and the Start menu are
+         the same offer, and only the platform knows which words apply. -->
     <div id="pin-note" class="pin-note" hidden>
-      <span>Keep this in your Dock so an account is always one click away.</span>
-      <button class="btn primary" id="pin-do" data-tip="Add to the Dock permanently (restarts the Dock)">Keep in Dock</button>
+      <span></span>
+      <button class="btn primary" id="pin-do"></button>
       <button class="iconbtn" id="pin-dismiss" aria-label="Dismiss" data-tip="Not now">✕</button>
     </div>
     <div id="archived-note" class="pin-note" hidden>

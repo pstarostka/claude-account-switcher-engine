@@ -3,10 +3,11 @@
 // Self-update from GitHub releases.
 //
 // Electron's own autoUpdater is not an option here: on macOS it goes through
-// Squirrel, which refuses anything without a Developer ID signature. This app
-// is ad-hoc signed, so the update is done by hand — download the release zip,
+// Squirrel, which refuses anything without a Developer ID signature, and on
+// Windows it wants a Squirrel install layout this app does not have. Neither
+// build is signed, so the update is done by hand — download the release zip,
 // check it against the checksum published beside it, unpack it, and swap the
-// bundle while the app is on its way out.
+// app while it is on its way out.
 //
 // One useful side effect of downloading it ourselves: the quarantine flag is
 // applied by whatever downloads a file, and Electron's net stack does not set
@@ -17,7 +18,6 @@
 // deleted, and put back if the copy fails.
 
 const { app, net } = require('electron')
-const { execFile, spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
@@ -26,7 +26,7 @@ const path = require('node:path')
 const { Readable } = require('node:stream')
 const { pipeline } = require('node:stream/promises')
 
-const macos = require('./macos')
+const platform = require('./platform')
 
 const REPO = repoFromPackage()
 const API = `https://api.github.com/repos/${REPO}/releases/latest`
@@ -54,6 +54,24 @@ function compareVersions (a, b) {
   }
   const pre = v => (/-/.test(String(v)) ? 0 : 1)
   return pre(a) - pre(b)
+}
+
+/**
+ * This platform's zip out of a release, and the checksum published for *that*
+ * zip.
+ *
+ * Both halves matter once a release carries more than one build. Taking the
+ * first `.zip` would hand a Mac a Windows build; taking the first `.sha256`
+ * would check one platform's download against the other's checksum, and the
+ * only symptom would be a corrupt-download error that never goes away.
+ *
+ * `assetRe` is a parameter so this can be tested in both directions from either
+ * machine — there is no other way to prove the Windows half from a Mac.
+ */
+function pickAsset (assets, assetRe = platform.ASSET_RE) {
+  const zip = (assets || []).find(a => /\.zip$/i.test(a.name) && assetRe.test(a.name))
+  if (!zip) return { zip: null, sum: null }
+  return { zip, sum: (assets || []).find(a => a.name === `${zip.name}.sha256`) || null }
 }
 
 // -------------------------------------------------------------------- fetch ---
@@ -88,9 +106,8 @@ async function check () {
     if (rel.draft) return { ok: true, available: false, current }
 
     const version = String(rel.tag_name || '').replace(/^v/, '')
-    const asset = (rel.assets || []).find(a => /\.zip$/i.test(a.name))
-    const sum = (rel.assets || []).find(a => /\.zip\.sha256$/i.test(a.name))
-    const newer = Boolean(asset) && compareVersions(version, current) > 0
+    const { zip: asset, sum } = pickAsset(rel.assets)
+    const newer = compareVersions(version, current) > 0
 
     return {
       ok: true,
@@ -100,8 +117,12 @@ async function check () {
       // refuses it — so it is reported as found rather than offered. Calling it
       // unavailable would amount to saying this version is the latest, which is
       // not true and is the one thing a version check must not get wrong.
-      available: newer && Boolean(sum),
-      unverifiable: newer && !sum,
+      available: newer && Boolean(asset) && Boolean(sum),
+      unverifiable: newer && Boolean(asset) && !sum,
+      // Same reasoning, one step earlier: a release built for the other platform
+      // only is still a newer release, and saying otherwise would report this
+      // version as the latest there is.
+      noBuild: newer && !asset,
       notes: String(rel.body || '').slice(0, 2000),
       publishedAt: rel.published_at ? Date.parse(rel.published_at) : null,
       url: asset?.browser_download_url || null,
@@ -130,17 +151,6 @@ function sha256 (file) {
       .on('end', () => resolve(h.digest('hex')))
   })
 }
-
-const runp = (cmd, args) => new Promise((resolve, reject) =>
-  execFile(cmd, args, { maxBuffer: 1 << 20 }, (err, out) => (err ? reject(err) : resolve(String(out)))))
-
-/**
- * Quote a string for /bin/sh. Single quotes are the only ones sh does nothing
- * inside, so the single quote itself is the one character needing care —
- * JSON.stringify looks close enough to be tempting here and is not: it leaves
- * `$` and backticks alone, which a double-quoted shell string still expands.
- */
-const sq = s => `'${String(s).replace(/'/g, "'\\''")}'`
 
 /**
  * Stream the response to disk.
@@ -210,75 +220,38 @@ function discard (staged) {
 // -------------------------------------------------------------------- apply ---
 
 /**
- * Swap the bundle and relaunch.
+ * Swap the installed app and relaunch.
  *
- * The replacement cannot happen in-process — the code doing it lives inside the
- * bundle being replaced — so it is handed to a detached shell script that waits
- * for this process to exit first. The old bundle is moved aside rather than
- * deleted, and moved back if the copy fails, so a failure here leaves a working
- * app rather than none.
+ * The replacement cannot happen in-process — the code doing it lives inside what
+ * is being replaced — so each platform hands it to a detached script that waits
+ * for this process to exit first. What is common to both lives here; how a
+ * bundle or a folder is actually unpacked, identified and swapped is in
+ * src/platform.
  */
 async function apply (staged) {
   if (!app.isPackaged) return { error: 'Updates only apply to an installed build, not to `npm start`.' }
 
-  const dest = macos.bundlePath()
-  if (!dest.endsWith('.app')) return { error: 'Could not work out where this app is installed.' }
+  const dest = platform.installPath()
+  if (!platform.installLooksSane(dest)) return { error: 'Could not work out where this app is installed.' }
   try {
     await fsp.access(path.dirname(dest), fs.constants.W_OK)
   } catch {
-    return { error: `No permission to replace ${dest}. Move the app somewhere you own, such as ~/Applications.` }
+    return { error: `No permission to replace ${dest}. Move the app somewhere you own.` }
   }
 
   const unpacked = path.join(staged.stage, 'unpacked')
-  await fsp.mkdir(unpacked, { recursive: true })
   try {
-    await runp('/usr/bin/ditto', ['-x', '-k', staged.zip, unpacked])
+    await platform.unpack(staged.zip, unpacked)
   } catch (e) {
     return { error: `Could not unpack the download: ${e.message}` }
   }
 
-  const entries = await fsp.readdir(unpacked)
-  const name = entries.find(n => n.endsWith('.app'))
-  if (!name) return { error: 'The download did not contain an app.' }
-  const fresh = path.join(unpacked, name)
-
   // Refuse anything that is not recognisably this app, however it got here.
-  try {
-    const plist = await fsp.readFile(path.join(fresh, 'Contents', 'Info.plist'), 'utf8')
-    if (!plist.includes('local.launcher.case')) {
-      return { error: 'The download is not CASE, so it was not installed.' }
-    }
-  } catch {
-    return { error: 'The download does not look like a macOS app bundle.' }
-  }
+  const fresh = await platform.findFresh(unpacked)
+  if (fresh.error) return fresh
 
-  const script = path.join(staged.stage, 'swap.sh')
-  await fsp.writeFile(script, `#!/bin/sh
-# Wait for CASE to exit before touching its own bundle.
-for i in $(seq 1 200); do
-  kill -0 ${process.pid} 2>/dev/null || break
-  sleep 0.1
-done
-
-DEST=${sq(dest)}
-FRESH=${sq(fresh)}
-STAGE=${sq(staged.stage)}
-
-rm -rf "$DEST.old"
-mv "$DEST" "$DEST.old" || exit 1
-if ! cp -R "$FRESH" "$DEST"; then
-  rm -rf "$DEST"
-  mv "$DEST.old" "$DEST"
-  exit 1
-fi
-xattr -dr com.apple.quarantine "$DEST" 2>/dev/null
-rm -rf "$DEST.old"
-open "$DEST"
-rm -rf "$STAGE"
-`, { mode: 0o755 })
-
-  spawn('/bin/sh', [script], { detached: true, stdio: 'ignore' }).unref()
+  await platform.swapAndRelaunch({ dest, fresh: fresh.path, stage: staged.stage, pid: process.pid })
   return { ok: true, relaunching: true }
 }
 
-module.exports = { check, download, discard, apply, compareVersions, sq, RELEASES_PAGE, REPO }
+module.exports = { check, download, discard, apply, compareVersions, pickAsset, RELEASES_PAGE, REPO }

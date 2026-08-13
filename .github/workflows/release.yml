@@ -5,18 +5,25 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# Only what publishing a release needs. The default token is read-only here
-# otherwise, and nothing in this job wants more than the release API.
+# Nothing here needs write access except the job that publishes, so only that
+# one gets it. The build legs run with the default read-only token.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    runs-on: macos-latest
+  # One leg per platform, because neither can build the other: @electron/packager
+  # writes the Windows icon and version resources through rcedit, which wants
+  # Wine off Windows, and a macOS bundle can only be signed on a Mac.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, tag: mac }
+          - { os: windows-latest, tag: win }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0        # release notes are generated from history
 
       - uses: actions/setup-node@v5
         with:
@@ -30,10 +37,11 @@ jobs:
       - name: Checks
         run: npm run check
 
-      - name: Build the universal bundle
+      - name: Build
         run: npm run dist
 
-      - name: Verify what we are about to publish
+      - name: Verify what we are about to publish (macOS)
+        if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           ZIP=$(ls out/*.zip)
@@ -56,6 +64,55 @@ jobs:
           test "$VER" = "$(node -p 'require("./package.json").version')" || { echo "::error::version mismatch"; exit 1; }
           lipo -archs "$APP/Contents/MacOS/CASE"
 
+      - name: Verify what we are about to publish (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = (Get-ChildItem out/*.zip)[0]
+          Write-Host "archive: $($zip.Name)"
+
+          # Checked the way the updater checks it: the hash published beside the
+          # file, against the file itself.
+          $want = (Get-Content "$($zip.FullName).sha256").Split(' ')[0]
+          $got = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { throw "checksum mismatch: $got vs $want" }
+
+          # Unpack it and confirm the layout the updater's findFresh() looks for.
+          $out = Join-Path $env:RUNNER_TEMP 'verify'
+          Expand-Archive $zip.FullName -DestinationPath $out -Force
+          $exe = Join-Path $out 'CASE\CASE.exe'
+          if (!(Test-Path $exe)) { throw 'no CASE\CASE.exe in the archive' }
+          if (!(Test-Path (Join-Path $out 'CASE\resources\app.asar'))) { throw 'no app.asar in the archive' }
+
+          $ver = (Get-Item $exe).VersionInfo.ProductVersion
+          $want = node -p "require('./package.json').version"
+          Write-Host "version: $ver"
+          if (-not $ver.StartsWith($want)) { throw "version mismatch: $ver vs $want" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.tag }}
+          path: out/*.zip*
+          if-no-files-found: error
+
+  # Both builds go into one release, so the updater finds its own platform's
+  # asset there whichever machine asked.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0        # release notes are generated from history
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,13 +121,14 @@ jobs:
           TAG=${GITHUB_REF_NAME}
           if [ "$TAG" = "main" ]; then TAG="v$(node -p 'require("./package.json").version')"; fi
 
-          # The app is ad-hoc signed, not notarised, so a browser download is
-          # quarantined and Gatekeeper refuses it. Say so where people will read
-          # it, not only in the README.
-          cat > /tmp/notes.md <<'EOF'
-          ### Install
+          ls -la dist
 
-          1. Download the `.zip` below and unzip it.
+          # Neither build is signed, so each platform stops a first download in
+          # its own way. Say so where people will read it, not only in the README.
+          cat > /tmp/notes.md <<'EOF'
+          ### Install — macOS
+
+          1. Download `CASE-*-mac-universal.zip` below and unzip it.
           2. Move `CASE.app` to `~/Applications`.
           3. **First launch only**, clear the download quarantine:
 
@@ -80,21 +138,35 @@ jobs:
 
           Step 3 is needed because this build is ad-hoc signed rather than
           notarised — notarising requires a paid Apple Developer account. Without
-          it macOS reports the app as damaged. Updates installed from inside the
-          app do not need this: CASE downloads them itself, and the quarantine
-          flag is only set by browsers.
-
-          Verify the download with the published checksum:
+          it macOS reports the app as damaged.
 
           ```bash
           shasum -a 256 -c CASE-*-mac-universal.zip.sha256
           ```
 
+          ### Install — Windows
+
+          1. Download `CASE-*-win-x64.zip` below, then **right-click it →
+             Properties → Unblock** *before* extracting. The mark-of-the-web
+             propagates to everything inside, and SmartScreen will otherwise
+             block the exe.
+          2. Extract the `CASE` folder to `%LOCALAPPDATA%\Programs\CASE`.
+          3. Run `CASE.exe`, then press **Add to Start menu** in the app — that
+             shortcut is also what lets Windows show notifications.
+
+          ```powershell
+          Get-FileHash CASE-*-win-x64.zip -Algorithm SHA256
+          ```
+
+          Updates installed from inside the app need none of this on either
+          platform: CASE downloads them itself, and checks them against the
+          checksums published here.
+
           ---
           EOF
 
           gh release create "$TAG" \
-            out/*.zip out/*.zip.sha256 \
+            dist/*.zip dist/*.zip.sha256 \
             --title "$TAG" \
             --notes-file /tmp/notes.md \
             --generate-notes

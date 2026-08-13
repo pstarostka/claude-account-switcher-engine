@@ -8,7 +8,13 @@ on:
 
 jobs:
   check:
-    runs-on: macos-latest
+    strategy:
+      # Both legs always run: knowing a change breaks one platform is more
+      # useful when you can see at the same time whether it broke the other.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
 
@@ -27,6 +33,7 @@ jobs:
       # versions, so that would fail for reasons that have nothing to do with
       # the artwork. These are the properties that actually have to hold.
       - name: Icon renders from icon.svg
+        if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           node tools/make-icon.js
@@ -38,3 +45,26 @@ jobs:
           echo "icon: ${W}px, alpha=${A}"
           test "$W" = "1024" || { echo "::error::icon is ${W}px, expected 1024"; exit 1; }
           test "$A" = "yes" || { echo "::error::icon has no alpha channel, so its corners are not transparent"; exit 1; }
+
+      # The same idea for the Windows set, asserted in Node because sips is a
+      # macOS command. A malformed .ico does not fail a build — it renders as a
+      # blank square in the taskbar — so something has to look at it.
+      - name: Icon renders as a Windows .ico
+        if: runner.os == 'Windows'
+        run: |
+          node tools/make-icon.js --win
+          node -e "
+            const fs = require('fs')
+            for (const f of ['assets/icon.ico', 'src/assets/tray-win.ico', 'src/assets/tray-win-dark.ico', 'src/assets/badge.png']) {
+              if (!fs.statSync(f).size) throw new Error(f + ' is empty')
+            }
+            const b = fs.readFileSync('assets/icon.ico')
+            if (b.readUInt16LE(0) !== 0 || b.readUInt16LE(2) !== 1) throw new Error('not an .ico')
+            const n = b.readUInt16LE(4)
+            if (n < 5) throw new Error('only ' + n + ' sizes in the icon')
+            for (let i = 0; i < n; i++) {
+              const e = 6 + i * 16
+              if (b.readUInt32LE(e + 12) + b.readUInt32LE(e + 8) > b.length) throw new Error('entry runs past the end')
+            }
+            console.log('icon.ico: ' + n + ' sizes')
+          "

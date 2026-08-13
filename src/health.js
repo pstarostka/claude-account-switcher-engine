@@ -28,9 +28,22 @@ const PROJECTS = path.join(os.homedir(), '.claude', 'projects')
 const KEEP_BACKUPS = 10
 
 // The profile Claude uses with no CLAUDE_USER_DATA_DIR set, and where Electron
-// leaves that profile's log.
-const DEFAULT_PROFILE = path.join(os.homedir(), 'Library', 'Application Support', 'Claude')
-const SHARED_LOG = path.join(os.homedir(), 'Library', 'Logs', 'Claude', 'main.log')
+// leaves that profile's log. Paths rather than plumbing, so they live here
+// rather than in src/platform — which also keeps this module loadable under
+// plain `node --test`, with no Electron anywhere.
+const WIN = process.platform === 'win32'
+const APPDATA = () => process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming')
+
+const DEFAULT_PROFILE = WIN
+  ? path.join(APPDATA(), 'Claude')
+  : path.join(os.homedir(), 'Library', 'Application Support', 'Claude')
+
+// On Windows Electron's default log directory is <userData>/logs, so for the
+// default profile the shared log sits inside the profile itself rather than off
+// in a Logs folder of its own.
+const SHARED_LOG = WIN
+  ? path.join(DEFAULT_PROFILE, 'logs', 'main.log')
+  : path.join(os.homedir(), 'Library', 'Logs', 'Claude', 'main.log')
 
 // ------------------------------------------------------------------ file io ---
 
@@ -58,7 +71,10 @@ function readTail (file, bytes = 262144) {
   } catch { return '' } finally { if (fd !== undefined) fs.closeSync(fd) }
 }
 
-const lines = text => text.split('\n').filter(Boolean)
+// Split on either ending: Claude writes this log on Windows too, and a stray
+// \r left on the end of a line both trails into the reason shown in the UI and
+// defeats the `$` anchor the failure pattern relies on.
+const lines = text => text.split(/\r?\n/).filter(Boolean)
 
 function parseJsonl (text, { skipFirst = false } = {}) {
   const out = []
@@ -130,13 +146,45 @@ function storageHealth (profile) {
   const ns = targetNamespace(profile)
   if (!ns) return { ok: false, reason: 'no session index yet' }
   try {
-    if (fs.lstatSync(ns.dir).isSymbolicLink()) {
+    // Not on Windows: libuv reports an NTFS junction as a symbolic link, and a
+    // junctioned storage directory does not reproduce the ENOTDIR failure this
+    // check exists to catch. The trial write below answers the real question.
+    if (!WIN && fs.lstatSync(ns.dir).isSymbolicLink()) {
       return { ok: false, reason: 'the storage directory is a symlink, which the app refuses to write into' }
     }
-    fs.accessSync(ns.dir, fs.constants.W_OK)
+    if (!writable(ns.dir)) return { ok: false, reason: 'the storage directory is not writable' }
     return { ok: true, reason: null }
   } catch {
     return { ok: false, reason: 'the storage directory is not writable' }
+  }
+}
+
+/**
+ * Whether a directory can actually be written to.
+ *
+ * On Windows accessSync(W_OK) answers about the read-only attribute and ignores
+ * the ACL, so a directory nothing may write to still passes — which would make
+ * this whole check report "fine" for the exact failure it exists to catch. The
+ * only honest test there is to write something.
+ *
+ * Everywhere else accessSync is a good enough approximation and is left alone,
+ * because this scan runs every two minutes and the promise elsewhere in this
+ * file is that it does not put anything into Claude's directories.
+ */
+function writable (dir) {
+  if (!WIN) {
+    try { fs.accessSync(dir, fs.constants.W_OK); return true } catch { return false }
+  }
+  // Created and removed in the same breath, in a directory the app writes to
+  // anyway. The pid is in the name so two copies cannot collide.
+  const probe = path.join(dir, `.case-write-probe-${process.pid}`)
+  try {
+    fs.writeFileSync(probe, '')
+    return true
+  } catch {
+    return false
+  } finally {
+    try { fs.rmSync(probe, { force: true }) } catch {}
   }
 }
 
@@ -358,4 +406,4 @@ function rebuild (account, orphan) {
   return { ok: true, file: dest }
 }
 
-module.exports = { scan, rebuild, backupIndex, PROJECTS }
+module.exports = { scan, rebuild, backupIndex, PROJECTS, DEFAULT_PROFILE, SHARED_LOG }

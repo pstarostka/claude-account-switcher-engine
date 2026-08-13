@@ -11,23 +11,14 @@
 // Nothing here deletes, with one exception that is named as such and sits behind
 // its own confirmation.
 
-const { execFile } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
+const platform = require('./platform')
 
 const SUFFIX = '.archived'
 
-/** Disk usage in bytes. `du` beats walking the tree: 8 GB measured in ~110 ms. */
-function size (dir) {
-  return new Promise(resolve => {
-    if (!fs.existsSync(dir)) return resolve(null)
-    execFile('/usr/bin/du', ['-sk', dir], { timeout: 20000 }, (err, stdout) => {
-      if (err) return resolve(null)
-      const kb = Number(String(stdout).trim().split(/\s+/)[0])
-      resolve(Number.isFinite(kb) ? kb * 1024 : null)
-    })
-  })
-}
+/** Disk usage in bytes. How it is measured differs by OS; see src/platform. */
+const size = dir => platform.profileSize(dir)
 
 /** First free path of the form `base`, `base-2`, `base-3`… */
 function freePath (base) {
@@ -39,15 +30,34 @@ function freePath (base) {
 const isArchivePath = name => name.includes(SUFFIX)
 
 /**
+ * Rename, with a few attempts before giving up.
+ *
+ * The rename *is* the operation here, and on Windows it fails outright while any
+ * file inside the directory is held open — which Defender, Windows Search or an
+ * Explorer preview will do briefly, for reasons that have nothing to do with us.
+ * macOS renames a directory with open files without complaint, so on a Mac this
+ * loop only ever runs once.
+ */
+async function rename (from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try { return fs.renameSync(from, to) } catch (e) {
+      const transient = e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES'
+      if (attempt === 3 || !transient) throw e
+      await new Promise(r => setTimeout(r, 200))
+    }
+  }
+}
+
+/**
  * Move a profile aside. Returns the record to store, or an error. The caller is
  * responsible for the guards that make this safe to offer at all — not the
  * default profile, not while it is running.
  */
-function archive (account, bytes) {
+async function archive (account, bytes) {
   if (!fs.existsSync(account.dir)) return { error: 'That profile folder is no longer there.' }
   const dest = freePath(account.dir + SUFFIX)
   try {
-    fs.renameSync(account.dir, dest)
+    await rename(account.dir, dest)
   } catch (e) {
     return { error: `Could not move the profile aside: ${e.message}` }
   }
@@ -70,11 +80,11 @@ function archive (account, bytes) {
  * Move an archived profile back. If something has since taken its old path — a
  * new account of the same name, say — it lands beside it rather than over it.
  */
-function restore (record) {
+async function restore (record) {
   if (!fs.existsSync(record.dir)) return { error: 'The archived folder is no longer there.' }
   const dest = freePath(record.originalDir)
   try {
-    fs.renameSync(record.dir, dest)
+    await rename(record.dir, dest)
   } catch (e) {
     return { error: `Could not move the profile back: ${e.message}` }
   }
