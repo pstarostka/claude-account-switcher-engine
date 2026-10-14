@@ -11,9 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  # One leg per platform, because neither can build the other: @electron/packager
-  # writes the Windows icon and version resources through rcedit, which wants
-  # Wine off Windows, and a macOS bundle can only be signed on a Mac.
+  # One leg per platform: a macOS bundle can only be signed on a Mac, and the
+  # Windows icon and version resources are compiled in with the MSVC toolchain.
   build:
     strategy:
       fail-fast: false
@@ -25,33 +24,51 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: '22'
-          cache: npm
+          targets: ${{ matrix.tag == 'mac' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - run: npm ci
+      - uses: Swatinem/rust-cache@v2
 
-      # Also asserts the tag matches package.json, so a mistagged release
-      # cannot reach anyone.
-      - name: Checks
-        run: npm run check
+      # A mistagged release must not reach anyone.
+      - name: Tag matches Cargo.toml
+        shell: bash
+        run: |
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version: $VER"
+          echo "VERSION=$VER" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF_NAME" == v* && "$GITHUB_REF_NAME" != "v$VER" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $VER"; exit 1
+          fi
 
-      - name: Build
-        run: npm run dist
+      - run: cargo test
+
+      # ---------------------------------------------------------------- macOS ---
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cargo install tauri-cli --version '^2' --locked
+          # Universal, so there is a single download whatever Mac someone is
+          # on. tauri.conf.json asks for an ad-hoc signature.
+          cargo tauri build --bundles app --target universal-apple-darwin
+          mkdir -p out
+          APP=target/universal-apple-darwin/release/bundle/macos/CASE.app
+          ZIP="CASE-$VERSION-mac-universal.zip"
+          # ditto rather than zip: it is the only archiver here that keeps the
+          # bundle's signature metadata, and what the updater unpacks with.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "out/$ZIP"
+          ( cd out && shasum -a 256 "$ZIP" > "$ZIP.sha256" )
 
       - name: Verify what we are about to publish (macOS)
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           ZIP=$(ls out/*.zip)
-          echo "archive: $ZIP"
-          # The checksum file names the archive without a path, so that whoever
-          # downloads both into one folder can just run `shasum -c`. Verify it
-          # the same way they will, from beside the file.
+          # The checksum file names the archive without a path, so whoever
+          # downloads both into one folder can just run `shasum -c`.
           ( cd out && shasum -a 256 -c "$(basename "$ZIP").sha256" )
-
-          # Unpack it and confirm it is a real, launchable, correctly versioned app.
           ditto -x -k "$ZIP" /tmp/verify
           APP=/tmp/verify/CASE.app
           test -d "$APP" || { echo "::error::no app in the archive"; exit 1; }
@@ -61,8 +78,26 @@ jobs:
           VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")
           echo "bundle: $BUNDLE  version: $VER"
           test "$BUNDLE" = "local.launcher.case" || { echo "::error::wrong bundle id"; exit 1; }
-          test "$VER" = "$(node -p 'require("./package.json").version')" || { echo "::error::version mismatch"; exit 1; }
+          test "$VER" = "$VERSION" || { echo "::error::version mismatch"; exit 1; }
           lipo -archs "$APP/Contents/MacOS/CASE"
+
+      # -------------------------------------------------------------- Windows ---
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release
+          # One exe, in a folder of its own inside the zip: the updater looks
+          # for a directory holding CASE.exe.
+          New-Item -ItemType Directory -Force stage/CASE, out | Out-Null
+          Copy-Item target/release/CASE.exe stage/CASE/
+          $zip = "CASE-$env:VERSION-win-x64.zip"
+          Compress-Archive -Path stage/CASE -DestinationPath "out/$zip"
+          $hash = (Get-FileHash "out/$zip" -Algorithm SHA256).Hash.ToLower()
+          # The format `shasum -c` reads, with no BOM and no CRLF.
+          [IO.File]::WriteAllText("$PWD/out/$zip.sha256", "$hash  $zip`n")
 
       - name: Verify what we are about to publish (Windows)
         if: runner.os == 'Windows'
@@ -70,25 +105,18 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $zip = (Get-ChildItem out/*.zip)[0]
-          Write-Host "archive: $($zip.Name)"
-
-          # Checked the way the updater checks it: the hash published beside the
-          # file, against the file itself.
           $want = (Get-Content "$($zip.FullName).sha256").Split(' ')[0]
           $got = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
           if ($got -ne $want) { throw "checksum mismatch: $got vs $want" }
-
-          # Unpack it and confirm the layout the updater's findFresh() looks for.
           $out = Join-Path $env:RUNNER_TEMP 'verify'
           Expand-Archive $zip.FullName -DestinationPath $out -Force
           $exe = Join-Path $out 'CASE\CASE.exe'
           if (!(Test-Path $exe)) { throw 'no CASE\CASE.exe in the archive' }
-          if (!(Test-Path (Join-Path $out 'CASE\resources\app.asar'))) { throw 'no app.asar in the archive' }
-
+          # What the updater's identity check looks for.
+          if (!(Select-String -Path $exe -Pattern 'local.launcher.case' -SimpleMatch -Quiet)) { throw 'the exe does not carry the bundle id' }
           $ver = (Get-Item $exe).VersionInfo.ProductVersion
-          $want = node -p "require('./package.json').version"
           Write-Host "version: $ver"
-          if (-not $ver.StartsWith($want)) { throw "version mismatch: $ver vs $want" }
+          if (-not $ver.StartsWith($env:VERSION)) { throw "version mismatch: $ver vs $env:VERSION" }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -119,7 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG=${GITHUB_REF_NAME}
-          if [ "$TAG" = "main" ]; then TAG="v$(node -p 'require("./package.json").version')"; fi
+          if [ "$TAG" = "main" ]; then TAG="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"; fi
 
           ls -la dist
 

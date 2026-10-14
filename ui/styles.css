@@ -54,6 +54,7 @@ body {
         "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  -webkit-user-select: none;
   user-select: none;
   cursor: default;
 }
@@ -61,7 +62,6 @@ body {
 /* ------------------------------------------------------------- titlebar --- */
 
 .titlebar {
-  -webkit-app-region: drag;
   flex: 0 0 auto;
   height: 52px;
   display: flex;
@@ -70,14 +70,9 @@ body {
   border-bottom: 1px solid transparent;
 }
 
-/* Windows paints its caption buttons over the top-right of the window and tells
-   the page where, through these environment variables. Without them the centred
-   title is centred on the whole width and slides under the close button. */
-body.win .titlebar {
-  height: env(titlebar-area-height, 52px);
-  margin-left: env(titlebar-area-x, 0);
-  width: env(titlebar-area-width, 100%);
-}
+/* Windows keeps its own caption bar, which already says CASE and carries the
+   close button; this one exists for the macOS traffic lights to sit in. */
+body.win .titlebar { display: none; }
 
 .titlebar-title {
   font-size: 13px;
@@ -123,7 +118,6 @@ body.win .titlebar {
 /* ---------------------------------------------------------------- cards --- */
 
 .card {
-  -webkit-app-region: no-drag;
   position: relative;
   display: flex;
   align-items: center;
@@ -204,7 +198,6 @@ body.win .titlebar {
 .card:focus-within .card-actions { opacity: 1; }
 
 .iconbtn {
-  -webkit-app-region: no-drag;
   width: 26px;
   height: 26px;
   display: grid;
@@ -223,7 +216,6 @@ body.win .titlebar {
 /* -------------------------------------------------------------- buttons --- */
 
 .btn {
-  -webkit-app-region: no-drag;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -274,7 +266,6 @@ body.win .titlebar {
 .check .icon { width: 12px; height: 12px; }
 
 .name-input {
-  -webkit-app-region: no-drag;
   width: 100%;
   background: transparent;
   border: 1px solid transparent;
@@ -285,6 +276,7 @@ body.win .titlebar {
   font-size: 13.5px;
   padding: 2px 6px;
   margin: -2px -6px;
+  -webkit-user-select: text;
   user-select: text;
 }
 
@@ -300,7 +292,6 @@ body.win .titlebar {
   display: grid;
   place-items: center;
   z-index: 20;
-  -webkit-app-region: no-drag;
 }
 
 .modal {
@@ -328,6 +319,7 @@ body.win .titlebar {
   background: var(--bg);
   color: var(--text);
   font: inherit;
+  -webkit-user-select: text;
   user-select: text;
 }
 
@@ -339,7 +331,6 @@ body.win .titlebar {
 /* --------------------------------------------------------------- banner --- */
 
 .banner {
-  -webkit-app-region: no-drag;
   margin: 0 16px 8px;
   padding: 8px 11px;
   border-radius: 9px;
@@ -435,7 +426,6 @@ body.win .titlebar {
 .orphan.restored { opacity: .55; }
 
 .link {
-  -webkit-app-region: no-drag;
   background: none;
   border: 0;
   padding: 0;
@@ -593,7 +583,6 @@ body.win .titlebar {
 .setting-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
 
 .keycap {
-  -webkit-app-region: no-drag;
   flex: 0 0 auto;
   min-width: 78px;
   height: 28px;
@@ -612,7 +601,6 @@ body.win .titlebar {
 .keycap.recording { border-color: var(--accent); color: var(--accent); }
 
 .switch {
-  -webkit-app-region: no-drag;
   flex: 0 0 auto;
   width: 38px;
   height: 22px;
@@ -679,7 +667,6 @@ body.win .titlebar {
 }
 
 .cell {
-  -webkit-app-region: no-drag;
   height: 30px;
   display: grid;
   place-items: center;

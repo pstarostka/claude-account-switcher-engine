@@ -1,0 +1,51 @@
+[package]
+name = "case"
+version = "4.0.0"
+description = "Claude Account Switcher Engine — run multiple Claude Desktop accounts side by side"
+license = "MIT"
+repository = "https://github.com/pstarostka/claude-account-switcher-engine"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "CASE"
+path = "src/main.rs"
+
+[dependencies]
+# custom-protocol always on: the UI is static files, so `cargo run` and
+# `cargo build` serve them from the binary exactly as a release does, with no
+# dev server to stand up first.
+tauri = { version = "2", features = ["custom-protocol", "tray-icon", "image-png", "image-ico"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# All four are already in Tauri's own dependency tree; naming them costs nothing.
+dirs = "7"
+regex = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["parsing"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Storage_EnhancedStorage",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
+] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

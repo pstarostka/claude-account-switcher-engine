@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;">
+  <!-- The Content-Security-Policy is set in tauri.conf.json, which adds what
+       Tauri's own IPC needs to it. -->
   <title>CASE</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="titlebar">
-    <span class="titlebar-title" data-tip="Claude Account Switcher Engine">CASE</span>
+  <header class="titlebar" data-tauri-drag-region>
+    <span class="titlebar-title" data-tauri-drag-region data-tip="Claude Account Switcher Engine">CASE</span>
   </header>
 
   <div id="banner" class="banner" hidden></div>
@@ -97,6 +97,7 @@
     </div>
   </div>
 
+  <script src="api.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

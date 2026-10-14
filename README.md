@@ -2,9 +2,10 @@
 
 **Claude Account Switcher Engine**
 
-A small Electron launcher for running **multiple Claude Desktop accounts** on one
+A small launcher for running **multiple Claude Desktop accounts** on one
 machine — side by side, with your settings and skills shared between them.
-macOS and Windows.
+macOS and Windows. Written in Rust on [Tauri](https://tauri.app), so it is a
+few megabytes rather than a second copy of Chromium.
 
 Click the icon, pick an account, Claude opens signed in as that account.
 
@@ -79,11 +80,12 @@ the app offer to do it for you.
 Download `CASE-*-win-x64.zip`, then **right-click it → Properties → Unblock
 before extracting**. Windows marks a downloaded zip, that mark propagates to
 everything extracted from it, and SmartScreen then refuses the exe. Extract the
-`CASE` folder to `%LOCALAPPDATA%\Programs\CASE` and run `CASE.exe`. To check the
+`CASE` folder to `%LOCALAPPDATA%\Programs\CASE` and run `CASE.exe`. It draws its
+window with WebView2, which Windows 10 and 11 already carry. To check the
 download first:
 
 ```powershell
-Get-FileHash CASE-3.1.1-win-x64.zip -Algorithm SHA256
+Get-FileHash CASE-4.0.0-win-x64.zip -Algorithm SHA256
 ```
 
 Then press **Add to Start menu** in the app. That is worth doing even if you do
@@ -91,30 +93,44 @@ not want the shortcut: Windows will not show a notification from an app it canno
 match to a Start menu entry, so the session-health warnings depend on it.
 
 **Updates need none of that, on either platform.** CASE checks GitHub once a day,
-and installs from **Settings → Check now**. It downloads the release itself,
-checks it against the published checksum, and swaps the app in place — and
-because both of those download marks are set by the *browser*, an update CASE
-fetched carries neither.
+and installs from **Settings → Check now**. It downloads the release itself with
+the system's `curl`, checks it against the published checksum, and swaps the app
+in place — and because both of those download marks are set by the *browser*, an
+update CASE fetched carries neither.
+
+Coming from an Electron build (3.x)? Its updater installs this one like any
+other release. Your accounts, settings and backups carry over untouched: they
+live in the same `accounts.json`, which this version reads as it is. One thing
+does not: if you had **Launch at login** on in 3.x on a Mac, that was a system
+login item this version cannot see. Remove CASE once under **System Settings →
+General → Login Items**, then switch the setting on again in CASE.
 
 ### Building it yourself
 
+You need [Rust](https://rustup.rs). On a Mac, the bundle comes from the Tauri
+CLI:
+
 ```bash
-npm install
-npm run build
+cargo install tauri-cli --version '^2' --locked   # once
+cargo tauri build --bundles app
+cp -R target/release/bundle/macos/CASE.app ~/Applications/
 ```
 
-On a Mac that builds and installs `~/Applications/CASE.app` for this machine's
-architecture; on Windows, `%LOCALAPPDATA%\Programs\CASE` plus a Start menu
-shortcut. Rebuilding installs to the same path, so a pinned tile keeps working;
-if a Dock tile shows a stale icon, run `killall Dock`.
+On Windows nothing needs bundling — the exe carries its own icon and version:
 
-`npm run dist` instead produces this platform's zip and checksum in `out/`
-without installing anything — that is what CI publishes. There is no
-cross-building: the Windows icon and version resources are written by `rcedit`,
-which wants Wine anywhere but Windows, and a macOS bundle can only be signed on a
-Mac. Each artifact comes from its own runner.
+```powershell
+cargo build --release
+Copy-Item target\release\CASE.exe "$env:LOCALAPPDATA\Programs\CASE\"
+```
 
-`npm run check` runs the parse, IPC and bridge checks and the tests.
+Installing to the same path each time keeps a Dock pin or Start menu shortcut
+working; if a Dock tile shows a stale icon, run `killall Dock`. There is no
+cross-building: a macOS bundle can only be signed on a Mac, and the Windows
+resources are compiled in with MSVC. Each release artifact comes from its own CI
+runner.
+
+`cargo test` runs the unit tests and `tests/bridge.rs`, which holds the page, its
+bridge and the Rust commands to the same names.
 
 ## How it works
 
@@ -274,7 +290,9 @@ cd <the session's cwd> && claude --resume <sessionId>
   pressing the combination you want — a combination another app already owns is
   refused rather than silently ignored.
 - **Launch at login.** Off by default. When on, the launcher starts hidden and
-  waits for the shortcut.
+  waits for the shortcut. It is a LaunchAgent on macOS
+  (`~/Library/LaunchAgents/local.launcher.case.plist`) and a `Run` key value on
+  Windows — both plain enough to check or remove by hand.
 - **Menu bar / notification area.** On by default: the account list lives there,
   so switching never needs a window. Optionally hide the Dock icon (or the
   taskbar button) and run from it alone — the pinned shortcut still launches the
@@ -430,63 +448,71 @@ Copy-Item "$env:APPDATA\Claude\claude_desktop_config.json" `
 ## Layout
 
 ```
-src/main.js              profiles, probing, launching, IPC
-src/tray.js              menu-bar / notification-area mode
-src/platform/index.js    picks one of the two below
-src/platform/mac.js      open(1), lsof, Dock pinning, ditto, the swap script
-src/platform/win.js      spawn + env, LOCK probing, taskkill, .lnk, tar, swap.ps1
-src/preload.js           contextBridge surface
-src/renderer/            picker UI (no framework)
-tools/make-icon.js       draws the app icon, the tray glyphs and the .ico
-tools/build.js           icon → package → install, or → zip + checksum
+src/main.rs              commands, window, hotkey, health and update watch
+src/store.rs             accounts.json
+src/health.rs            session index, logs, transcripts, backups, rebuild
+src/usage.rs             plan usage from Claude's own history file
+src/archive.rs           moving a profile aside and back
+src/chrome.rs            Chrome profiles and pairing
+src/update.rs            GitHub releases, curl, checksum, swap
+src/tray.rs              menu-bar / notification-area mode
+src/platform/mac.rs      open(1), lsof, Dock pinning, LaunchAgent, ditto, swap.sh
+src/platform/win.rs      spawn + env, LOCK probing, taskkill, .lnk, Run key, tar, swap.ps1
+ui/api.js                the page's bridge to the commands
+ui/                      picker UI (no framework)
+assets/                  the icon artwork, and the tray and badge images
+icons/                   bundle icons, from `cargo tauri icon assets/icon.png` —
+                         except icon.ico, the full-bleed Windows set, kept as is
 ```
 
-The two platform modules export the same keys and are held to it by
-`test/platform.test.js`, which loads both whichever machine it runs on — so a
-Windows-only gap shows up on a Mac. Paths stay in the module that uses them;
-only things that spawn a process or ask the OS a question move into
-`src/platform`.
+The two platform modules export the same names, and the compiler holds them to
+it on whichever machine builds — which is why CI builds on both. Paths stay in
+the module that uses them; only things that spawn a process or ask the OS a
+question move into `src/platform`.
 
 ## Development
 
 ```bash
-npm start                                     # run from source
-CLAUDE_ACCOUNTS_SHOT=/tmp/ui.png npm start    # render the window to a PNG and exit
-CLAUDE_ACCOUNTS_WATCH_MS=3000 npm start       # shorten the health-watch interval
+cargo run                                     # run from source
+CLAUDE_ACCOUNTS_WATCH_MS=3000 cargo run       # shorten the health-watch interval
 ```
+
+A debug build never offers to install an update: there is no bundle to swap.
 
 ## Uninstall
 
 ```bash
 rm -rf "$HOME/Applications/CASE.app"                                  # macOS
+rm -f "$HOME/Library/LaunchAgents/local.launcher.case.plist"
 ```
 
 ```powershell
 Remove-Item -Recurse "$env:LOCALAPPDATA\Programs\CASE"                # Windows
 Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\CASE.lnk"
+reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v CASE /f
 ```
 
-Profiles and CASE's own data directory are left alone. If launch-at-login was
-enabled, turn it off in Settings first.
+Profiles and CASE's own data directory are left alone.
 
-Note: while a global shortcut is enabled, closing the window hides it instead of
-quitting — a shortcut cannot outlive its process. Use `⌘Q` (`Ctrl+Q`) to quit
-properly.
+Note: while a global shortcut or the menu bar is enabled, closing the window hides
+it instead of quitting — a shortcut cannot outlive its process. Use `⌘Q`, or
+**Quit CASE** in the menu bar or notification area, to quit properly.
 
 ## Releasing
 
-Bump the version in `package.json`, then tag it. CI does the rest — the tag has
+Bump the version in `Cargo.toml`, then tag it. CI does the rest — the tag has
 to match the version or the build refuses.
 
 ```bash
-git tag v3.1.0 && git push origin v3.1.0
+git tag v4.0.0 && git push origin v4.0.0
 ```
 
 `.github/workflows/release.yml` builds on both platforms at once — the universal
-bundle on a Mac, the x64 folder on Windows — and each leg verifies its own
+bundle on a Mac, the x64 exe on Windows — and each leg verifies its own
 artifact before handing it on: checksum, signature, bundle id, version and
-architectures on one; checksum, layout and version resource on the other. A third
-job puts both into a single GitHub release with install instructions attached.
+architectures on one; checksum, layout, bundle id and version resource on the
+other. A third job puts both into a single GitHub release with install
+instructions attached.
 
 One release carrying two builds is why the updater matches its asset by platform
 *and* pairs the checksum to the zip it chose by name. Taking the first `.zip` and
@@ -498,4 +524,4 @@ clears.
 
 [MIT](LICENSE) — use it, fork it, ship it. Keep the copyright notice.
 
-Electron is bundled in the built app under its own MIT licence.
+Tauri is built into the app under its own MIT / Apache-2.0 licence.
