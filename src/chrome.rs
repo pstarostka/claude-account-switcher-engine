@@ -16,7 +16,7 @@ use serde_json::Value;
 // Claude in Chrome.
 const EXTENSION_ID: &str = "fcoeoabgfenejglbffodgkkbkcdhcgfn";
 
-pub use host::{installed, launch};
+pub use host::{front, installed, launch};
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -28,16 +28,38 @@ pub struct Profile {
     pub last_used: bool,
 }
 
+fn local_state() -> std::io::Result<Value> {
+    let bytes = std::fs::read(host::root().join("Local State"))?;
+    Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+/// Whether the OS refuses CASE a look at Chrome's data. macOS guards it as
+/// another app's data, so without Full Disk Access the profile list is empty.
+pub fn blocked() -> bool {
+    installed() && local_state().is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// Whether Chrome has a window open on this profile. Chrome keeps
+/// profile.last_active_profiles current as windows open and close (it is what
+/// it restores on the next start), so it only counts while Chrome is running.
+// ponytail: Chrome writes Local State a few seconds late, so a second click
+// straight after the first can still open another window.
+pub fn is_open(dir: &str) -> bool {
+    host::running()
+        && local_state().is_ok_and(|s| {
+            s["profile"]["last_active_profiles"]
+                .as_array()
+                .is_some_and(|open| open.iter().any(|d| d == dir))
+        })
+}
+
 /// Every Chrome profile, newest-used first.
 pub fn list_profiles() -> Vec<Profile> {
     if !installed() {
         return Vec::new();
     }
     let root = host::root();
-    let Some(state) = std::fs::read(root.join("Local State"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-    else {
+    let Ok(state) = local_state() else {
         return Vec::new();
     };
     let last_used = state["profile"]["last_used"].as_str();

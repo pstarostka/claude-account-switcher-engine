@@ -505,6 +505,15 @@ pub mod chrome {
         app_data().join("Google/Chrome")
     }
 
+    pub fn running() -> bool {
+        run("/usr/bin/pgrep", &["-x", "Google Chrome"], secs(4)).ok
+    }
+
+    /// Bring Chrome forward without opening anything.
+    pub fn front() {
+        run("/usr/bin/open", &["-a", "Google Chrome"], secs(8));
+    }
+
     /// Open a Chrome window on a profile. Creates the profile if it does not exist.
     pub fn launch(profile_dir: &str, url: Option<&str>) {
         let mut args = vec![

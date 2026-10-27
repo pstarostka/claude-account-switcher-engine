@@ -386,6 +386,13 @@ async function loadChrome (a, card) {
       h('div', { class: 'label' }, 'Chrome'), h('div', { class: 'help' }, 'Google Chrome is not installed.'))))
     return
   }
+  if (info.blocked) {
+    card.replaceChildren(h('div', { class: 'card-row' }, icon('globe', 18), h('div', { class: 'card-body' },
+      h('div', { class: 'label' }, 'Chrome profiles'),
+      h('div', { class: 'help warn' }, 'macOS keeps Chrome’s data from other apps. Give CASE Full Disk Access, then reopen it.')),
+      h('button', { type: 'button', class: 'btn', onclick: () => api.openLink('fullDiskAccess') }, 'Open Settings')))
+    return
+  }
   let current = info.current
   const render = () => {
     const dir = current?.dir || ''

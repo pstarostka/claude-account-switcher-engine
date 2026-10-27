@@ -610,9 +610,20 @@ pub mod chrome {
         local_app_data().join(r"Google\Chrome\User Data")
     }
 
+    pub fn running() -> bool {
+        let Output { ok, out } = run(
+            system32("tasklist.exe"),
+            &["/FI", "IMAGENAME eq chrome.exe", "/FO", "CSV", "/NH"],
+            secs(4),
+        );
+        ok && out.contains("\"chrome.exe\"")
+    }
+
+    /// Windows has no app to front, only windows; the open one is left as is.
+    pub fn front() {}
+
     /// Open a Chrome window on a profile. Creates the profile if it does not
-    /// exist. Chrome routes by profile itself, so a second launch on a profile
-    /// already open just raises its window.
+    /// exist. Each launch is a new window, so check `chrome::is_open` first.
     pub fn launch(profile_dir: &str, url: Option<&str>) {
         let Some(exe) = exe() else { return };
         let _ = Command::new(exe)

@@ -246,7 +246,12 @@ fn open_paired_chrome(a: &Account) {
         .as_ref()
         .filter(|c| c.open_on_launch && !c.dir.is_empty())
     {
-        chrome::launch(&c.dir, None);
+        // A second launch on an open profile is another window, not the same one.
+        if chrome::is_open(&c.dir) {
+            chrome::front();
+        } else {
+            chrome::launch(&c.dir, None);
+        }
     }
 }
 
@@ -609,6 +614,9 @@ fn app_open_link(which: String) {
         "source" => base,
         "releases" => update::releases_page(),
         "licence" => format!("{base}/blob/main/LICENSE"),
+        "fullDiskAccess" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles".into()
+        }
         _ => return,
     };
     platform::open_url(&url);
@@ -701,6 +709,7 @@ fn chrome_list(account_id: String) -> Value {
     let a = find(&account_id);
     json!({
         "installed": chrome::installed(),
+        "blocked": chrome::blocked(),
         "suggestion": a.as_ref().and_then(|a| chrome::suggest_for(&a.name, &profiles)).map(|p| p.dir.clone()),
         "current": a.and_then(|a| a.chrome),
         "profiles": profiles,
